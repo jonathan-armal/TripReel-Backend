@@ -82,7 +82,23 @@ exports.transitionState = async (req, res) => {
 // POST /api/operators/onboarding  (operator protected)
 exports.submitOnboarding = async (req, res) => {
     try {
-        const { businessName, registeredAddress, gstin, pan, tan, bankAccountNumber } = req.body
+        const {
+            businessName,
+            registeredAddress,
+            officeAddress,
+            businessInfo,
+            gstin,
+            pan,
+            tan,
+            bankAccountNumber,
+            yearsOfExperience,
+            toursConducted,
+            regionsOperated,
+            tourTypes,
+            servicesOffered,
+            tourismTravelLicenseExpiry,
+            liabilityInsuranceExpiry,
+        } = req.body
 
         const operator = await Operator.findById(req.operator._id)
         if (!operator) {
@@ -96,10 +112,42 @@ exports.submitOnboarding = async (req, res) => {
         // Update business fields
         operator.businessName = businessName
         operator.registeredAddress = registeredAddress
+        operator.officeAddress = officeAddress
+        operator.businessInfo = businessInfo
         operator.gstin = gstin
         operator.pan = pan
         operator.tan = tan
         operator.bankAccountNumber = bankAccountNumber
+        operator.yearsOfExperience = Number(yearsOfExperience || 0)
+        operator.toursConducted = Number(toursConducted || 0)
+
+        const parseList = (val) => {
+            if (!val) return []
+            if (Array.isArray(val)) return val.filter(Boolean)
+            if (typeof val === 'string') {
+                try {
+                    const parsed = JSON.parse(val)
+                    return Array.isArray(parsed) ? parsed.filter(Boolean) : []
+                } catch {
+                    return val
+                        .split(',')
+                        .map(s => s.trim())
+                        .filter(Boolean)
+                }
+            }
+            return []
+        }
+
+        const parseDate = (val) => {
+            if (!val) return undefined
+            const d = new Date(val)
+            return Number.isNaN(d.getTime()) ? undefined : d
+        }
+        operator.regionsOperated = parseList(regionsOperated)
+        operator.tourTypes = parseList(tourTypes)
+        operator.servicesOffered = parseList(servicesOffered)
+        operator.tourismTravelLicenseExpiry = parseDate(tourismTravelLicenseExpiry)
+        operator.liabilityInsuranceExpiry = parseDate(liabilityInsuranceExpiry)
 
         // Update document paths from uploaded files
         const documentFields = [
@@ -110,17 +158,129 @@ exports.submitOnboarding = async (req, res) => {
             'tan',
             'industryAssociationCertificate',
             'liabilityInsuranceCertificate',
+            'authorizedSignatoryIdProof',
+            'tourismTravelLicense',
+            'officeAddressProof',
+            'companyLogo',
+            'coverBanner',
         ]
 
         if (req.files) {
             for (const fieldName of documentFields) {
                 if (req.files[fieldName] && req.files[fieldName][0]) {
                     operator.documents[fieldName] = '/uploads/' + req.files[fieldName][0].filename
+                    operator.documentStatus[fieldName] = {
+                        status: 'PENDING',
+                        remark: '',
+                        updatedAt: new Date(),
+                    }
                 }
             }
         }
 
         operator.onboardingState = 'DOCUMENTS_SUBMITTED'
+
+        await operator.save()
+
+        res.json({ success: true, operator })
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message })
+    }
+}
+
+// PATCH /api/operators/documents/reupload  (operator protected)
+exports.reuploadDocument = async (req, res) => {
+    try {
+        const { key } = req.body
+
+        const allowedKeys = [
+            'gstCertificate',
+            'pan',
+            'incorporationCertificate',
+            'bankProof',
+            'tan',
+            'industryAssociationCertificate',
+            'liabilityInsuranceCertificate',
+            'authorizedSignatoryIdProof',
+            'tourismTravelLicense',
+            'officeAddressProof',
+            'companyLogo',
+            'coverBanner',
+        ]
+
+        if (!allowedKeys.includes(key)) {
+            return res.status(400).json({ success: false, message: 'Invalid document key' })
+        }
+
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: 'File is required' })
+        }
+
+        const operator = await Operator.findById(req.operator._id)
+        if (!operator) {
+            return res.status(404).json({ success: false, message: 'Operator not found' })
+        }
+
+        const currentStatus = operator.documentStatus?.[key]?.status
+        if (currentStatus !== 'REUPLOAD_REQUIRED' && currentStatus !== 'REJECTED') {
+            return res.status(400).json({
+                success: false,
+                message: 'Re-upload is not allowed for this document',
+            })
+        }
+
+        operator.documents[key] = '/uploads/' + req.file.filename
+        operator.documentStatus[key] = {
+            status: 'PENDING',
+            remark: '',
+            updatedAt: new Date(),
+        }
+
+        await operator.save()
+
+        res.json({ success: true, operator })
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message })
+    }
+}
+
+// PATCH /api/operators/:id/document-status (admin only)
+exports.updateDocumentStatus = async (req, res) => {
+    try {
+        const { key, status, remark } = req.body
+
+        const allowedKeys = [
+            'gstCertificate',
+            'pan',
+            'incorporationCertificate',
+            'bankProof',
+            'tan',
+            'industryAssociationCertificate',
+            'liabilityInsuranceCertificate',
+            'authorizedSignatoryIdProof',
+            'tourismTravelLicense',
+            'officeAddressProof',
+            'companyLogo',
+            'coverBanner',
+        ]
+
+        if (!allowedKeys.includes(key)) {
+            return res.status(400).json({ success: false, message: 'Invalid document key' })
+        }
+
+        const allowedStatuses = ['PENDING', 'APPROVED', 'REJECTED', 'REUPLOAD_REQUIRED']
+        if (!allowedStatuses.includes(status)) {
+            return res.status(400).json({ success: false, message: 'Invalid status' })
+        }
+
+        const operator = await Operator.findById(req.params.id)
+        if (!operator) return res.status(404).json({ success: false, message: 'Operator not found' })
+
+        operator.documentStatus[key] = {
+            status,
+            remark: (remark || '').trim(),
+            updatedAt: new Date(),
+        }
 
         await operator.save()
 

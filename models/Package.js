@@ -18,6 +18,78 @@ const addonSchema = new mongoose.Schema(
     { _id: false }
 )
 
+const packagePricingSchema = new mongoose.Schema(
+    {
+        adultPrice: { type: Number, default: 0, min: 0 },
+        childPrice: { type: Number, default: 0, min: 0 },
+        extraPersonPrice: { type: Number, default: 0, min: 0 },
+        discountPrice: { type: Number, default: 0, min: 0 },
+        gstPercent: { type: Number, default: 0, min: 0 },
+        convenienceFee: { type: Number, default: 0, min: 0 },
+    },
+    { _id: false }
+)
+
+const packageHotelSchema = new mongoose.Schema(
+    {
+        hotelName: { type: String, trim: true, default: '' },
+        hotelCategory: { type: String, trim: true, default: '' },
+        roomType: { type: String, trim: true, default: '' },
+        mealPlan: { type: String, trim: true, default: '' },
+    },
+    { _id: false }
+)
+
+const packageTransportSchema = new mongoose.Schema(
+    {
+        flightIncluded: { type: Boolean, default: false },
+        busIncluded: { type: Boolean, default: false },
+        cabIncluded: { type: Boolean, default: false },
+        pickupDrop: { type: String, trim: true, default: '' },
+        vehicleType: { type: String, trim: true, default: '' },
+    },
+    { _id: false }
+)
+
+const packageAvailabilitySchema = new mongoose.Schema(
+    {
+        startDate: { type: Date },
+        endDate: { type: Date },
+        availableSeats: { type: Number, default: 0, min: 0 },
+        bookingDeadline: { type: Date },
+    },
+    { _id: false }
+)
+
+const packageLocationSchema = new mongoose.Schema(
+    {
+        destinationName: { type: String, trim: true, default: '' },
+        googleMapUrl: { type: String, trim: true, default: '' },
+        pickupPoint: { type: String, trim: true, default: '' },
+        meetingPoint: { type: String, trim: true, default: '' },
+    },
+    { _id: false }
+)
+
+const packagePoliciesSchema = new mongoose.Schema(
+    {
+        cancellationPolicy: { type: String, trim: true, default: '' },
+        refundPolicy: { type: String, trim: true, default: '' },
+        terms: { type: String, trim: true, default: '' },
+    },
+    { _id: false }
+)
+
+const packageOfferSchema = new mongoose.Schema(
+    {
+        couponCode: { type: String, trim: true, default: '' },
+        earlyBirdOffer: { type: String, trim: true, default: '' },
+        festivalOffer: { type: String, trim: true, default: '' },
+        groupDiscount: { type: String, trim: true, default: '' },
+    },
+    { _id: false }
+)
+
 const packageSchema = new mongoose.Schema(
     {
         title: {
@@ -30,18 +102,64 @@ const packageSchema = new mongoose.Schema(
             required: [true, 'Location is required'],
             trim: true,
         },
+        subtitle: {
+            type: String,
+            trim: true,
+            default: '',
+        },
+        packageCode: {
+            type: String,
+            trim: true,
+            default: '',
+        },
+        tourType: {
+            type: String,
+            trim: true,
+            default: '',
+        },
+        destination: {
+            type: String,
+            trim: true,
+            default: '',
+        },
+        departureCity: {
+            type: String,
+            trim: true,
+            default: '',
+        },
+        durationDays: {
+            type: Number,
+            min: 0,
+            default: 0,
+        },
+        durationNights: {
+            type: Number,
+            min: 0,
+            default: 0,
+        },
         category: {
             type: String,
             trim: true,
             default: '',
         },
+        categories: [{ type: String }],
         description: {
+            type: String,
+            trim: true,
+            default: '',
+        },
+        fullDescription: {
             type: String,
             trim: true,
             default: '',
         },
         about: {
             type: String,
+            default: '',
+        },
+        whyChoose: {
+            type: String,
+            trim: true,
             default: '',
         },
         rating: {
@@ -68,6 +186,8 @@ const packageSchema = new mongoose.Schema(
             enum: ['Popular', 'Trending', 'New', ''],
             default: 'Popular',
         },
+        isFeatured: { type: Boolean, default: false },
+        isTrending: { type: Boolean, default: false },
         duration: {
             type: String,
             default: '',
@@ -77,6 +197,14 @@ const packageSchema = new mongoose.Schema(
         inclusions: [{ type: String }],
         exclusions: [{ type: String }],
         addons: [addonSchema],
+        videos: [{ type: String }],
+        hotelDetails: packageHotelSchema,
+        transportDetails: packageTransportSchema,
+        pricing: packagePricingSchema,
+        availability: packageAvailabilitySchema,
+        locationDetails: packageLocationSchema,
+        policies: packagePoliciesSchema,
+        offer: packageOfferSchema,
         image_url: {
             type: String,
             default: '',
@@ -94,7 +222,7 @@ const packageSchema = new mongoose.Schema(
         },
         status: {
             type: String,
-            enum: ['PENDING', 'NEEDS_REVISION', 'APPROVED', 'REJECTED'],
+            enum: ['DRAFT', 'PENDING', 'NEEDS_REVISION', 'APPROVED', 'REJECTED', 'EXPIRED'],
             default: 'PENDING',
         },
         adminNotes: {

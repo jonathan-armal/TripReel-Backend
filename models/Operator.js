@@ -27,6 +27,19 @@ const transitionHistorySchema = new mongoose.Schema(
     { _id: false }
 )
 
+const documentStatusSchema = new mongoose.Schema(
+    {
+        status: {
+            type: String,
+            enum: ['PENDING', 'APPROVED', 'REJECTED', 'REUPLOAD_REQUIRED'],
+            default: 'PENDING',
+        },
+        remark: { type: String, default: '', trim: true },
+        updatedAt: { type: Date, default: Date.now },
+    },
+    { _id: false }
+)
+
 const operatorSchema = new mongoose.Schema(
     {
         contactName: { type: String, required: true, trim: true },
@@ -35,10 +48,19 @@ const operatorSchema = new mongoose.Schema(
         password: { type: String, required: true, minlength: 8, select: false },
         businessName: { type: String, trim: true },
         registeredAddress: { type: String, trim: true },
+        officeAddress: { type: String, trim: true },
+        businessInfo: { type: String, trim: true },
         gstin: { type: String, trim: true },
         pan: { type: String, trim: true },
         tan: { type: String, trim: true },
         bankAccountNumber: { type: String, trim: true },
+        yearsOfExperience: { type: Number, default: 0, min: 0 },
+        toursConducted: { type: Number, default: 0, min: 0 },
+        regionsOperated: [{ type: String }],
+        tourTypes: [{ type: String }],
+        servicesOffered: [{ type: String }],
+        tourismTravelLicenseExpiry: { type: Date },
+        liabilityInsuranceExpiry: { type: Date },
         onboardingState: { type: String, enum: VALID_STATES, default: 'DRAFT' },
         documents: {
             gstCertificate: { type: String },
@@ -48,6 +70,25 @@ const operatorSchema = new mongoose.Schema(
             tan: { type: String },
             industryAssociationCertificate: { type: String },
             liabilityInsuranceCertificate: { type: String },
+            authorizedSignatoryIdProof: { type: String },
+            tourismTravelLicense: { type: String },
+            officeAddressProof: { type: String },
+            companyLogo: { type: String },
+            coverBanner: { type: String },
+        },
+        documentStatus: {
+            gstCertificate: documentStatusSchema,
+            pan: documentStatusSchema,
+            incorporationCertificate: documentStatusSchema,
+            bankProof: documentStatusSchema,
+            tan: documentStatusSchema,
+            industryAssociationCertificate: documentStatusSchema,
+            liabilityInsuranceCertificate: documentStatusSchema,
+            authorizedSignatoryIdProof: documentStatusSchema,
+            tourismTravelLicense: documentStatusSchema,
+            officeAddressProof: documentStatusSchema,
+            companyLogo: documentStatusSchema,
+            coverBanner: documentStatusSchema,
         },
         transitionHistory: [transitionHistorySchema],
     },

@@ -6,7 +6,7 @@ const Package = require('../models/Package')
 exports.getAllPackages = async (req, res) => {
     try {
         const { search, category, badge, page = 1, limit = 20 } = req.query
-        const query = { isActive: true, status: 'APPROVED' }
+        const query = { isActive: true, status: { $in: ['APPROVED'] } }
 
         if (search) {
             query.$or = [
@@ -14,7 +14,12 @@ exports.getAllPackages = async (req, res) => {
                 { location: { $regex: search, $options: 'i' } },
             ]
         }
-        if (category) query.category = { $regex: category, $options: 'i' }
+        if (category) {
+            query.$and = [
+                ...(query.$and || []),
+                { $or: [{ category: { $regex: category, $options: 'i' } }, { categories: { $regex: category, $options: 'i' } }] },
+            ]
+        }
         if (badge) query.badge = badge
 
         const skip = (Number(page) - 1) * Number(limit)
@@ -75,7 +80,7 @@ exports.adminGetAllPackages = async (req, res) => {
 // PATCH /api/packages/:id/review  (admin — approve, reject, or request revision)
 exports.reviewPackage = async (req, res) => {
     try {
-        const { action, adminNotes, approvedCategory } = req.body
+        const { action, adminNotes, approvedCategory, isFeatured, isTrending, badge } = req.body
         // action: 'approve' | 'reject' | 'needs_revision'
 
         const statusMap = {
@@ -95,10 +100,17 @@ exports.reviewPackage = async (req, res) => {
 
         if (action === 'approve') {
             update.isActive = true
-            if (approvedCategory) update.category = approvedCategory
+            if (approvedCategory) {
+                update.approvedCategory = approvedCategory
+                update.category = approvedCategory
+            }
         } else {
             update.isActive = false
         }
+
+        if (typeof isFeatured === 'boolean') update.isFeatured = isFeatured
+        if (typeof isTrending === 'boolean') update.isTrending = isTrending
+        if (badge) update.badge = badge
 
         const pkg = await Package.findByIdAndUpdate(req.params.id, update, { new: true })
         if (!pkg) return res.status(404).json({ success: false, message: 'Package not found' })
@@ -159,17 +171,38 @@ exports.operatorCreatePackage = async (req, res) => {
         delete body.existing_image_url
         delete body.existing_images
 
-            // Parse JSON array fields sent as strings in multipart
-            ;['highlights', 'inclusions', 'exclusions', 'itinerary', 'addons'].forEach(key => {
-                if (typeof body[key] === 'string') {
-                    try { body[key] = JSON.parse(body[key]) } catch { body[key] = [] }
-                }
-            })
+        const parseJSON = (val, fallback) => {
+            if (typeof val !== 'string') return val
+            try { return JSON.parse(val) } catch { return fallback }
+        }
+
+        ;['highlights', 'inclusions', 'exclusions', 'itinerary', 'addons', 'categories', 'videos'].forEach(key => {
+            if (typeof body[key] === 'string') body[key] = parseJSON(body[key], [])
+        })
+        ;['hotelDetails', 'transportDetails', 'pricing', 'availability', 'locationDetails', 'policies', 'offer'].forEach(key => {
+            if (typeof body[key] === 'string') body[key] = parseJSON(body[key], {})
+        })
+
+        const normalizeDate = (val) => {
+            if (!val) return undefined
+            const d = new Date(val)
+            return Number.isNaN(d.getTime()) ? undefined : d
+        }
+        if (body.availability) {
+            body.availability.startDate = normalizeDate(body.availability.startDate)
+            body.availability.endDate = normalizeDate(body.availability.endDate)
+            body.availability.bookingDeadline = normalizeDate(body.availability.bookingDeadline)
+        }
+
+        const submissionMode = (body.submissionMode || 'SUBMIT').toString().toUpperCase()
+        delete body.submissionMode
+
+        const status = submissionMode === 'DRAFT' ? 'DRAFT' : 'PENDING'
 
         const pkg = await Package.create({
             ...body,
             operatorId: req.operator._id,
-            status: 'PENDING',
+            status,
             isActive: false,
         })
         res.status(201).json({ success: true, package: pkg })
@@ -212,16 +245,38 @@ exports.operatorUpdatePackage = async (req, res) => {
         delete body.existing_image_url
         delete body.existing_images
 
-            // Parse JSON array fields sent as strings in multipart
-            ;['highlights', 'inclusions', 'exclusions', 'itinerary', 'addons'].forEach(key => {
-                if (typeof body[key] === 'string') {
-                    try { body[key] = JSON.parse(body[key]) } catch { body[key] = [] }
-                }
-            })
+        const parseJSON = (val, fallback) => {
+            if (typeof val !== 'string') return val
+            try { return JSON.parse(val) } catch { return fallback }
+        }
+
+        ;['highlights', 'inclusions', 'exclusions', 'itinerary', 'addons', 'categories', 'videos'].forEach(key => {
+            if (typeof body[key] === 'string') body[key] = parseJSON(body[key], [])
+        })
+        ;['hotelDetails', 'transportDetails', 'pricing', 'availability', 'locationDetails', 'policies', 'offer'].forEach(key => {
+            if (typeof body[key] === 'string') body[key] = parseJSON(body[key], {})
+        })
+
+        const normalizeDate = (val) => {
+            if (!val) return undefined
+            const d = new Date(val)
+            return Number.isNaN(d.getTime()) ? undefined : d
+        }
+        if (body.availability) {
+            body.availability.startDate = normalizeDate(body.availability.startDate)
+            body.availability.endDate = normalizeDate(body.availability.endDate)
+            body.availability.bookingDeadline = normalizeDate(body.availability.bookingDeadline)
+        }
+
+        const submissionMode = (body.submissionMode || 'SUBMIT').toString().toUpperCase()
+        delete body.submissionMode
+
+        const nextStatus = submissionMode === 'DRAFT' ? 'DRAFT' : 'PENDING'
+        const resetNotes = nextStatus === 'PENDING'
 
         const updated = await Package.findByIdAndUpdate(
             req.params.id,
-            { ...body, status: 'PENDING', adminNotes: '', isActive: false },
+            { ...body, status: nextStatus, adminNotes: resetNotes ? '' : pkg.adminNotes, isActive: false },
             { new: true, runValidators: true }
         )
         res.json({ success: true, package: updated })
