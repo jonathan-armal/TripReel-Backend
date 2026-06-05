@@ -77,7 +77,7 @@ async function debitOperatorWallet(operatorId, amount, bookingId, description) {
 // POST /api/trip-bookings  — user creates a booking
 exports.createBooking = async (req, res) => {
   try {
-    const { packageId, batchId, seats = 1, travelerNames = [] } = req.body;
+    const { packageId, batchId, seats = 1 } = req.body;
 
     if (!packageId || !batchId) {
       return res.status(400).json({
@@ -124,18 +124,7 @@ exports.createBooking = async (req, res) => {
       });
     }
 
-    // ── Check user hasn't already booked this batch ────────────────────────
-    const existing = await TripBooking.findOne({
-      userId: req.user._id,
-      batchId,
-      status: { $in: ["PENDING", "CONFIRMED"] },
-    });
-    if (existing) {
-      return res.status(400).json({
-        success: false,
-        message: "You have already booked this batch",
-      });
-    }
+    // User CAN book same batch multiple times (e.g. adding more friends later)
 
     // ── Fetch package ──────────────────────────────────────────────────────
     const pkg = await Package.findById(packageId);
@@ -224,22 +213,31 @@ exports.createBooking = async (req, res) => {
       adultPrice: batch.adultPrice,
     };
 
-    // ── Create booking ─────────────────────────────────────────────────────
+    // ── Create booking — auto-confirmed (payment simulated) ──────────────────
     const booking = await TripBooking.create({
       userId: req.user._id,
       packageId,
       batchId,
       operatorId: batch.operatorId,
       seats: numSeats,
-      travelerNames: Array.isArray(travelerNames)
-        ? travelerNames
-            .slice(0, numSeats)
-            .map((n) => String(n || "").trim())
-            .filter(Boolean)
+      status: "CONFIRMED", // auto-confirmed — no admin approval needed
+      travelers: Array.isArray(req.body.travelers)
+        ? req.body.travelers.slice(0, numSeats).map((t) => ({
+            name: String(t.name || "").trim(),
+            gender: String(t.gender || "").trim(),
+            age: Number(t.age) || 0,
+          }))
         : [],
       pricing,
       snapshot,
     });
+
+    // ── Side effects — increment seats + bookingCount immediately ──────────
+    await Batch.findByIdAndUpdate(batchId, { $inc: { bookedSeats: numSeats } });
+    await Package.findByIdAndUpdate(packageId, {
+      $inc: { bookingCount: numSeats },
+    });
+    // NOTE: Wallet credit happens via cron 2 days after trip endDate (not now)
 
     res.status(201).json({ success: true, booking });
   } catch (err) {
@@ -378,7 +376,7 @@ exports.updateBookingStatus = async (req, res) => {
 
     // ── Side effects ──────────────────────────────────────────────────────
 
-    // CONFIRMED → increment bookedSeats + bookingCount + credit wallet
+    // CONFIRMED → increment bookedSeats + bookingCount (wallet released by cron after trip ends)
     if (status === "CONFIRMED" && prevStatus !== "CONFIRMED") {
       await Batch.findByIdAndUpdate(booking.batchId, {
         $inc: { bookedSeats: booking.seats },
@@ -386,12 +384,7 @@ exports.updateBookingStatus = async (req, res) => {
       await Package.findByIdAndUpdate(booking.packageId, {
         $inc: { bookingCount: booking.seats },
       });
-      await creditOperatorWallet(
-        booking.operatorId,
-        booking.pricing.operatorAmount,
-        booking._id,
-        `Booking ${booking.bookingId} confirmed`,
-      );
+      // No wallet credit here — funds released 2 days after trip endDate via cron
     }
 
     // CANCELLED (was CONFIRMED) → reverse seats + bookingCount + debit wallet

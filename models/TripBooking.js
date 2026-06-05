@@ -77,7 +77,21 @@ const tripBookingSchema = new mongoose.Schema(
       min: 1,
     },
 
-    // Traveler names — seat 1 auto-filled from user profile, rest optional
+    // Traveler details — name, gender, age for each person
+    travelers: [
+      {
+        name: { type: String, trim: true, default: "" },
+        gender: {
+          type: String,
+          enum: ["Male", "Female", "Other", ""],
+          default: "",
+        },
+        age: { type: Number, default: 0, min: 0 },
+        _id: false,
+      },
+    ],
+
+    // Legacy field — kept for backward compat
     travelerNames: [{ type: String, trim: true }],
 
     // Booking status

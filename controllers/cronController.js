@@ -12,22 +12,48 @@ const Batch = require("../models/Batch");
  */
 async function runCronJobs() {
   const now = new Date();
-  const results = { completed: 0, cancelled: 0, errors: [] };
+  const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
+  const results = { completed: 0, cancelled: 0, walletReleased: 0, errors: [] };
 
   try {
-    // ── Job 1: Auto-complete ───────────────────────────────────────────────
-    // Find all CONFIRMED bookings where the batch endDate has passed
+    // ── Job 1: Auto-complete confirmed bookings where endDate + 2 days passed ──
     const confirmedBookings = await TripBooking.find({
       status: "CONFIRMED",
     }).populate("batchId", "endDate");
 
     for (const booking of confirmedBookings) {
       try {
-        if (booking.batchId && booking.batchId.endDate < now) {
+        if (booking.batchId && booking.batchId.endDate < twoDaysAgo) {
           booking.status = "COMPLETED";
-          booking.hasReviewed = false; // ensure it's false so rating prompt shows
+          booking.hasReviewed = false;
           await booking.save();
           results.completed++;
+
+          // Release funds to operator wallet (2 days after trip end)
+          const OperatorWallet = require("../models/OperatorWallet");
+          const WalletTransaction = require("../models/WalletTransaction");
+
+          const wallet = await OperatorWallet.findOneAndUpdate(
+            { operatorId: booking.operatorId },
+            {
+              $inc: {
+                balance: booking.pricing.operatorAmount,
+                totalEarned: booking.pricing.operatorAmount,
+              },
+            },
+            { upsert: true, new: true },
+          );
+
+          await WalletTransaction.create({
+            operatorId: booking.operatorId,
+            bookingId: booking._id,
+            type: "CREDIT",
+            amount: booking.pricing.operatorAmount,
+            description: `Booking ${booking.bookingId} — funds released after trip completion`,
+            balanceAfter: wallet.balance,
+          });
+
+          results.walletReleased++;
         }
       } catch (e) {
         results.errors.push(`Auto-complete ${booking.bookingId}: ${e.message}`);
@@ -35,7 +61,6 @@ async function runCronJobs() {
     }
 
     // ── Job 2: Auto-cancel expired pending bookings ────────────────────────
-    // Find all PENDING bookings where the batch bookingDeadline has passed
     const pendingBookings = await TripBooking.find({
       status: "PENDING",
     }).populate("batchId", "bookingDeadline");
