@@ -88,6 +88,22 @@ const packageSchema = new mongoose.Schema(
       required: [true, "Location is required"],
       trim: true,
     },
+    // Structured location fields for proximity-based filtering
+    country: {
+      type: String,
+      trim: true,
+      default: "India",
+    },
+    state: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    city: {
+      type: String,
+      trim: true,
+      default: "",
+    },
     tourType: {
       type: String,
       trim: true,
@@ -178,6 +194,7 @@ const packageSchema = new mongoose.Schema(
     transportDetails: packageTransportSchema,
     pricing: packagePricingSchema,
     availability: packageAvailabilitySchema,
+    // batches moved to separate Batch collection — see models/Batch.js
     policies: packagePoliciesSchema,
     offer: packageOfferSchema,
     image_url: {
@@ -214,6 +231,12 @@ const packageSchema = new mongoose.Schema(
     approvedCategory: {
       type: String,
       default: "",
+    },
+    // Number of confirmed bookings — used as a popularity signal alongside avgRating
+    bookingCount: {
+      type: Number,
+      default: 0,
+      min: 0,
     },
   },
   { timestamps: true },

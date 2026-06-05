@@ -3,15 +3,28 @@ const Package = require("../models/Package");
 // ── Public / shared ───────────────────────────────────────────────────────────
 
 // GET /api/packages  (public — only approved packages)
+// Supports ?userCountry=India&userState=Goa for nearby-first Curated sort
 exports.getAllPackages = async (req, res) => {
   try {
-    const { search, category, badge, sortBy, page = 1, limit = 20 } = req.query;
+    const {
+      search,
+      category,
+      badge,
+      sortBy,
+      userCountry,
+      userState,
+      page = 1,
+      limit = 20,
+    } = req.query;
     const query = { isActive: true, status: { $in: ["APPROVED"] } };
 
     if (search) {
       query.$or = [
         { title: { $regex: search, $options: "i" } },
         { location: { $regex: search, $options: "i" } },
+        { city: { $regex: search, $options: "i" } },
+        { state: { $regex: search, $options: "i" } },
+        { country: { $regex: search, $options: "i" } },
       ];
     }
     if (category) {
@@ -27,20 +40,107 @@ exports.getAllPackages = async (req, res) => {
     }
     if (badge) query.badge = badge;
 
-    // Sort: rating_desc for Popular Destinations, default newest first
+    const skip = (Number(page) - 1) * Number(limit);
+
+    // Nearby-first sort for Curated Packages:
+    // Priority 3 = same state (closest), 2 = same country (rest of India), 1 = abroad
+    if (userState || userCountry) {
+      const uc = (userCountry || "India").trim();
+      const us = (userState || "").trim();
+
+      const packages = await Package.aggregate([
+        { $match: query },
+        {
+          $addFields: {
+            nearbyScore: {
+              $cond: [
+                // Same country AND same state → closest
+                {
+                  $and: [
+                    { $eq: [{ $toLower: "$country" }, uc.toLowerCase()] },
+                    us
+                      ? { $eq: [{ $toLower: "$state" }, us.toLowerCase()] }
+                      : { $literal: false },
+                  ],
+                },
+                3,
+                {
+                  $cond: [
+                    // Same country only
+                    { $eq: [{ $toLower: "$country" }, uc.toLowerCase()] },
+                    2,
+                    1, // abroad
+                  ],
+                },
+              ],
+            },
+            popularityScore: {
+              $add: [
+                { $multiply: [{ $ifNull: ["$bookingCount", 0] }, 2] },
+                { $multiply: [{ $ifNull: ["$avgRating", 0] }, 10] },
+                { $multiply: [{ $ifNull: ["$reviewCount", 0] }, 0.5] },
+              ],
+            },
+          },
+        },
+        { $sort: { nearbyScore: -1, popularityScore: -1, createdAt: -1 } },
+        { $skip: skip },
+        { $limit: Number(limit) },
+      ]);
+
+      const total = await Package.countDocuments(query);
+      return res.json({ success: true, total, page: Number(page), packages });
+    }
+
+    // Default sort without location context
     const sortMap = {
-      rating_desc: { avgRating: -1, reviewCount: -1 },
+      popular_score: { bookingCount: -1, avgRating: -1, reviewCount: -1 },
+      rating_desc: { avgRating: -1, reviewCount: -1, bookingCount: -1 },
       newest: { createdAt: -1 },
     };
     const sort = sortMap[sortBy] || { createdAt: -1 };
 
-    const skip = (Number(page) - 1) * Number(limit);
     const [packages, total] = await Promise.all([
       Package.find(query).skip(skip).limit(Number(limit)).sort(sort),
       Package.countDocuments(query),
     ]);
 
     res.json({ success: true, total, page: Number(page), packages });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /api/packages/popular  (public — ranked by booking count + rating)
+// Logic: packages with more bookings rank first; among packages with 0 bookings
+// (nobody rated yet), higher avgRating wins; ties broken by reviewCount.
+exports.getPopularPackages = async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 10, 50);
+    const query = { isActive: true, status: "APPROVED" };
+
+    // Use an aggregation so we can compute a combined popularityScore:
+    // score = (bookingCount * 2) + (avgRating * 10) + (reviewCount * 0.5)
+    // This ensures a package with many bookings but no ratings still shows up,
+    // and a package with great ratings but 0 bookings still ranks reasonably.
+    const packages = await Package.aggregate([
+      { $match: query },
+      {
+        $addFields: {
+          popularityScore: {
+            $add: [
+              { $multiply: [{ $ifNull: ["$bookingCount", 0] }, 2] },
+              { $multiply: [{ $ifNull: ["$avgRating", 0] }, 10] },
+              { $multiply: [{ $ifNull: ["$reviewCount", 0] }, 0.5] },
+            ],
+          },
+        },
+      },
+      { $sort: { popularityScore: -1, createdAt: -1 } },
+      { $limit: limit },
+    ]);
+
+    res.json({ success: true, total: packages.length, packages });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -105,12 +205,10 @@ exports.reviewPackage = async (req, res) => {
     };
 
     if (!statusMap[action]) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "Invalid action. Use approve, reject, or needs_revision.",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid action. Use approve, reject, or needs_revision.",
+      });
     }
 
     const update = {
@@ -148,6 +246,34 @@ exports.deletePackage = async (req, res) => {
 };
 
 // ── Operator ──────────────────────────────────────────────────────────────────
+
+// Shared helper — normalizes and validates batch dates for both create and update
+function normalizeBatches(batches) {
+  if (!Array.isArray(batches)) return [];
+  return batches
+    .filter((b) => b.startDate && b.endDate)
+    .map((b) => {
+      const toDate = (v) => {
+        if (!v) return undefined;
+        const d = new Date(v);
+        return isNaN(d) ? undefined : d;
+      };
+      const start = toDate(b.startDate);
+      const end = toDate(b.endDate);
+      let deadline = toDate(b.bookingDeadline);
+      // Enforce: booking deadline must not be after start date
+      if (deadline && start && deadline > start) deadline = start;
+      return {
+        ...(b._id ? { _id: b._id } : {}),
+        startDate: start,
+        endDate: end,
+        availableSeats: Math.max(0, Number(b.availableSeats) || 0),
+        bookedSeats: Math.max(0, Number(b.bookedSeats) || 0),
+        bookingDeadline: deadline,
+        label: (b.label || "").trim(),
+      };
+    });
+}
 
 // GET /api/packages/operator/mine  (operator — their own packages)
 exports.operatorGetMyPackages = async (req, res) => {
@@ -237,6 +363,16 @@ exports.operatorCreatePackage = async (req, res) => {
       );
     }
 
+    // Normalize batches array
+    if (typeof body.batches === "string") {
+      try {
+        body.batches = JSON.parse(body.batches);
+      } catch {
+        body.batches = [];
+      }
+    }
+    body.batches = normalizeBatches(body.batches);
+
     const submissionMode = (body.submissionMode || "SUBMIT")
       .toString()
       .toUpperCase();
@@ -269,12 +405,10 @@ exports.operatorUpdatePackage = async (req, res) => {
         .json({ success: false, message: "Package not found or not yours" });
 
     if (pkg.status === "APPROVED") {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "Approved packages cannot be edited. Contact admin.",
-        });
+      // Allow editing approved packages — content updates immediately,
+      // status resets to PENDING for admin re-review.
+      // Package stays isActive=true so it remains visible in the app during review.
+      // If admin rejects, they'll request revision and operator can fix.
     }
 
     const body = { ...req.body };
@@ -350,6 +484,16 @@ exports.operatorUpdatePackage = async (req, res) => {
       );
     }
 
+    // Normalize batches array
+    if (typeof body.batches === "string") {
+      try {
+        body.batches = JSON.parse(body.batches);
+      } catch {
+        body.batches = [];
+      }
+    }
+    body.batches = normalizeBatches(body.batches);
+
     const submissionMode = (body.submissionMode || "SUBMIT")
       .toString()
       .toUpperCase();
@@ -358,13 +502,17 @@ exports.operatorUpdatePackage = async (req, res) => {
     const nextStatus = submissionMode === "DRAFT" ? "DRAFT" : "PENDING";
     const resetNotes = nextStatus === "PENDING";
 
+    // If package was previously APPROVED, keep it visible (isActive=true)
+    // while the edit goes for re-review. Otherwise hide it.
+    const wasApproved = pkg.status === "APPROVED";
+
     const updated = await Package.findByIdAndUpdate(
       req.params.id,
       {
         ...body,
         status: nextStatus,
         adminNotes: resetNotes ? "" : pkg.adminNotes,
-        isActive: false,
+        isActive: wasApproved ? true : false,
       },
       { new: true, runValidators: true },
     );

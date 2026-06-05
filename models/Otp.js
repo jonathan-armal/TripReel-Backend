@@ -22,6 +22,7 @@ const otpSchema = new mongoose.Schema(
       name: { type: String, trim: true },
       email: { type: String, trim: true, lowercase: true },
       state: { type: String, trim: true },
+      country: { type: String, trim: true, default: "India" },
     },
     attempts: {
       type: Number,

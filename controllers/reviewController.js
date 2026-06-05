@@ -67,10 +67,10 @@ exports.getPackageReviews = async (req, res) => {
 // ── User (requires auth) ───────────────────────────────────────────────────────
 
 // POST /api/reviews
-// Body: { packageId, tripId (optional), rating, comment }
+// Body: { packageId, tripId (optional), batchId (optional), bookingId (optional), rating, comment }
 exports.createReview = async (req, res) => {
   try {
-    const { packageId, tripId, rating, comment } = req.body;
+    const { packageId, tripId, batchId, bookingId, rating, comment } = req.body;
 
     if (!packageId) {
       return res
@@ -94,12 +94,26 @@ exports.createReview = async (req, res) => {
           .json({ success: false, message: "Trip not found" });
       }
       if (trip.status !== "Completed") {
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message: "You can only review a completed trip",
-          });
+        return res.status(400).json({
+          success: false,
+          message: "You can only review a completed trip",
+        });
+      }
+    }
+
+    // If bookingId provided, verify the booking belongs to this user and is COMPLETED
+    if (bookingId) {
+      const TripBooking = require("../models/TripBooking");
+      const booking = await TripBooking.findOne({
+        _id: bookingId,
+        userId: req.user.id,
+        status: "COMPLETED",
+      });
+      if (!booking) {
+        return res.status(400).json({
+          success: false,
+          message: "Booking not found or trip not completed",
+        });
       }
     }
 
@@ -118,6 +132,8 @@ exports.createReview = async (req, res) => {
         packageId,
         userId: req.user.id,
         tripId: tripId || null,
+        batchId: batchId || null,
+        bookingRef: bookingId || null,
         rating: r,
         comment: (comment || "").trim(),
       },
@@ -127,6 +143,12 @@ exports.createReview = async (req, res) => {
     // Recalculate package rating
     const stats = await recalcPackageRating(pkg._id);
 
+    // Flip hasReviewed on the TripBooking so rating prompt disappears
+    if (bookingId) {
+      const TripBooking = require("../models/TripBooking");
+      await TripBooking.findByIdAndUpdate(bookingId, { hasReviewed: true });
+    }
+
     res.status(201).json({
       success: true,
       review,
@@ -134,12 +156,10 @@ exports.createReview = async (req, res) => {
     });
   } catch (err) {
     if (err.code === 11000) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "You have already reviewed this package",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "You have already reviewed this package",
+      });
     }
     res.status(500).json({ success: false, message: err.message });
   }

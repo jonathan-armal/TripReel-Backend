@@ -1,15 +1,23 @@
 const Reel = require("../models/Reel");
 
 // GET /api/reels
+// Supports ?country=India&state=Goa to filter reels by structured location
 exports.getAllReels = async (req, res) => {
   try {
-    const { search, badge, page = 1, limit = 20 } = req.query;
+    const { search, country, state, badge, page = 1, limit = 20 } = req.query;
     const query = { isActive: true };
 
-    if (search) {
+    if (state) {
+      query.state = { $regex: state.trim(), $options: "i" };
+      if (country) query.country = { $regex: country.trim(), $options: "i" };
+    } else if (country && !state) {
+      query.country = { $regex: country.trim(), $options: "i" };
+    } else if (search) {
       query.$or = [
         { title: { $regex: search, $options: "i" } },
         { location: { $regex: search, $options: "i" } },
+        { city: { $regex: search, $options: "i" } },
+        { state: { $regex: search, $options: "i" } },
       ];
     }
     if (badge) query.badge = badge;

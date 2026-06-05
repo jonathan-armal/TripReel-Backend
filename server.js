@@ -39,6 +39,14 @@ app.use("/api/reels", require("./routes/reelRoutes"));
 app.use("/api/operators/auth", require("./routes/operatorAuthRoutes"));
 app.use("/api/operators", require("./routes/operatorRoutes"));
 
+// ── New booking system (Phase 1) ──────────────────────────────────────────────
+app.use("/api/batches", require("./routes/batchRoutes"));
+app.use("/api/trip-bookings", require("./routes/tripBookingRoutes"));
+app.use("/api/operator-bookings", require("./routes/operatorBookingRoutes"));
+app.use("/api/settings", require("./routes/platformSettingsRoutes"));
+app.use("/api/wallet", require("./routes/walletRoutes"));
+app.use("/api/cron", require("./routes/cronRoutes"));
+
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   res.json({ message: "TripReel API is running", status: "OK" });
@@ -62,6 +70,24 @@ mongoose
   .then(() => {
     console.log("✅ MongoDB connected");
     app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+    // ── Schedule daily cron job at midnight ────────────────────────────────
+    const cron = require("node-cron");
+    const { runCronJobs } = require("./controllers/cronController");
+
+    // Runs every day at 00:00 server time
+    cron.schedule("0 0 * * *", async () => {
+      try {
+        const result = await runCronJobs();
+        console.log(
+          `✅ Cron: ${result.completed} completed, ${result.cancelled} cancelled`,
+        );
+      } catch (err) {
+        console.error("❌ Cron error:", err.message);
+      }
+    });
+
+    console.log("⏰ Daily cron scheduled (midnight)");
   })
   .catch((err) => {
     console.error("❌ MongoDB connection error:", err.message);

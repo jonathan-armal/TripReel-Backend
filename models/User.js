@@ -45,6 +45,11 @@ const userSchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
+    country: {
+      type: String,
+      trim: true,
+      default: "India",
+    },
     tripsCount: {
       type: Number,
       default: 0,

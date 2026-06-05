@@ -122,6 +122,7 @@ exports.signupSendOtp = async (req, res) => {
     const email = (req.body.email || "").toLowerCase().trim();
     const phone = normalizePhone(req.body.phone);
     const state = (req.body.state || "").trim();
+    const country = (req.body.country || "India").trim();
 
     if (!name || !email || !phone) {
       return res.status(400).json({
@@ -156,7 +157,7 @@ exports.signupSendOtp = async (req, res) => {
       phone,
       code,
       purpose: "signup",
-      payload: { name, email, state },
+      payload: { name, email, state, country },
       expiresAt,
     });
 
@@ -223,7 +224,7 @@ exports.signupVerifyOtp = async (req, res) => {
     }
 
     // OTP valid — create the user
-    const { name, email, state } = record.payload || {};
+    const { name, email, state, country } = record.payload || {};
     if (!name || !email) {
       await record.deleteOne();
       return res.status(400).json({
@@ -242,7 +243,13 @@ exports.signupVerifyOtp = async (req, res) => {
       });
     }
 
-    const user = await User.create({ name, email, phone, state: state || "" });
+    const user = await User.create({
+      name,
+      email,
+      phone,
+      state: state || "",
+      country: country || "India",
+    });
     await record.deleteOne();
 
     const token = signToken(user._id);
@@ -384,11 +391,13 @@ exports.loginVerifyOtp = async (req, res) => {
 // PATCH /api/profile  — update own name / email / phone / state
 exports.updateProfile = async (req, res) => {
   try {
-    const { name, email, phone, state } = req.body;
+    const { name, email, phone, state, country } = req.body;
     const update = {};
 
     if (name && name.trim()) update.name = name.trim();
     if (typeof state !== "undefined") update.state = (state || "").trim();
+    if (typeof country !== "undefined")
+      update.country = (country || "India").trim();
 
     if (email && email.trim()) {
       const e = email.trim().toLowerCase();

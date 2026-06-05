@@ -20,6 +20,17 @@ const reviewSchema = new mongoose.Schema(
       ref: "Trip",
       default: null,
     },
+    // New booking system references
+    batchId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Batch",
+      default: null,
+    },
+    bookingRef: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "TripBooking",
+      default: null,
+    },
     rating: {
       type: Number,
       required: [true, "Rating is required"],
