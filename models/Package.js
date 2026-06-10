@@ -5,6 +5,8 @@ const itineraryDaySchema = new mongoose.Schema(
     day: { type: Number, required: true },
     title: { type: String, required: true },
     points: [{ type: String }],
+    pickupPoint: { type: String, default: "" },
+    isOutsideCity: { type: Boolean, default: false },
   },
   { _id: false },
 );
@@ -189,6 +191,12 @@ const packageSchema = new mongoose.Schema(
     inclusions: [{ type: String }],
     exclusions: [{ type: String }],
     addons: [addonSchema],
+    // Per-person surcharge for outside-city addon days (photographer/reel maker)
+    outsideCityCharge: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     videos: [{ type: String }],
     hotelDetails: packageHotelSchema,
     transportDetails: packageTransportSchema,

@@ -90,33 +90,61 @@ mongoose
 
     // ── Schedule cron jobs ─────────────────────────────────────────────────
     const cron = require("node-cron");
-    const { runCronJobs } = require("./controllers/cronController");
+    const {
+      runAutoCompleteAndCancel,
+      runTripReminders,
+      runReviewReminders,
+      runWishlistAlerts,
+      runCronJobs,
+    } = require("./controllers/cronController");
 
-    // Runs at 10:00 AM daily (IST) for trip reminders + midnight for auto-complete
-    cron.schedule("0 10 * * *", async () => {
-      try {
-        const result = await runCronJobs();
-        console.log(
-          `\u2705 Cron (10AM): ${result.completed} completed, ${result.cancelled} cancelled, ${result.reminders || 0} reminders, ${result.reviewReminders || 0} review reminders`,
-        );
-      } catch (err) {
-        console.error("\u274C Cron error:", err.message);
-      }
-    });
-
-    // Also run at midnight for auto-complete and cancellations
+    // 12:00 AM (Midnight) — Auto-complete trips + auto-cancel expired bookings + wallet credits
     cron.schedule("0 0 * * *", async () => {
       try {
-        const result = await runCronJobs();
+        const result = await runAutoCompleteAndCancel();
         console.log(
-          `\u2705 Cron (midnight): ${result.completed} completed, ${result.cancelled} cancelled`,
+          `✅ Cron (midnight): ${result.completed} completed, ${result.cancelled} cancelled, ${result.walletReleased} wallets credited`,
         );
       } catch (err) {
-        console.error("\u274C Cron error:", err.message);
+        console.error("❌ Cron midnight error:", err.message);
       }
     });
 
-    console.log("⏰ Daily cron scheduled (midnight)");
+    // 9:00 AM — Trip countdown reminders (7d, 3d, 1d, today)
+    cron.schedule("0 9 * * *", async () => {
+      try {
+        const result = await runTripReminders();
+        console.log(`✅ Cron (9AM): ${result.reminders} trip reminders sent`);
+      } catch (err) {
+        console.error("❌ Cron 9AM error:", err.message);
+      }
+    });
+
+    // 11:00 AM — Review reminders (day 1, 2, 3 after trip end)
+    cron.schedule("0 11 * * *", async () => {
+      try {
+        const result = await runReviewReminders();
+        console.log(
+          `✅ Cron (11AM): ${result.reviewReminders} review reminders sent`,
+        );
+      } catch (err) {
+        console.error("❌ Cron 11AM error:", err.message);
+      }
+    });
+
+    // 6:00 PM — Wishlist urgency alerts (low seats, deadline tomorrow)
+    cron.schedule("0 18 * * *", async () => {
+      try {
+        const result = await runWishlistAlerts();
+        console.log(
+          `✅ Cron (6PM): ${result.urgencyAlerts} wishlist alerts sent`,
+        );
+      } catch (err) {
+        console.error("❌ Cron 6PM error:", err.message);
+      }
+    });
+
+    console.log("⏰ Cron jobs scheduled: midnight, 9AM, 11AM, 6PM");
   })
   .catch((err) => {
     console.error("❌ MongoDB connection error:", err.message);

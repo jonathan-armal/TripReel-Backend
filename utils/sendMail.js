@@ -96,6 +96,10 @@ const sendBookingConfirmation = async ({ to, userName, bookingDetails }) => {
     inclusions,
     operatorName,
     operatorPhone,
+    addonNames,
+    addonTotalPrice,
+    addonDays,
+    itineraryDays,
   } = bookingDetails;
 
   const travelersHtml = (travelers || [])
@@ -108,7 +112,7 @@ const sendBookingConfirmation = async ({ to, userName, bookingDetails }) => {
   const itineraryHtml = (itinerary || [])
     .map(
       (day) =>
-        `<div style="margin-bottom:10px;"><strong style="color:#1F8A70;">Day ${day.day}:</strong> <span style="color:#374151;">${day.title}</span>${day.points?.length ? '<ul style="margin:4px 0 0 16px;padding:0;color:#4B5563;font-size:13px;">' + day.points.map((p) => `<li>${p}</li>`).join("") + "</ul>" : ""}</div>`,
+        `<div style="margin-bottom:10px;"><strong style="color:#1F8A70;">Day ${day.day}:</strong> <span style="color:#374151;">${day.title}</span>${day.pickupPoint ? `<br/><span style="font-size:12px;color:${day.isOutsideCity ? "#D97706" : "#16A34A"};">📍 ${day.pickupPoint}</span>` : ""}${day.points?.length ? '<ul style="margin:4px 0 0 16px;padding:0;color:#4B5563;font-size:13px;">' + day.points.map((p) => `<li>${p}</li>`).join("") + "</ul>" : ""}</div>`,
     )
     .join("");
 
@@ -118,6 +122,30 @@ const sendBookingConfirmation = async ({ to, userName, bookingDetails }) => {
         `<span style="display:inline-block;background:#ECFDF5;color:#065F46;padding:3px 10px;border-radius:12px;font-size:11px;margin:3px 3px 3px 0;">${inc}</span>`,
     )
     .join("");
+
+  // Build addon section for email
+  let addonsHtml = "";
+  if (addonNames && addonNames.length > 0) {
+    let addonRows = "";
+    for (const name of addonNames) {
+      const days = addonDays?.[name] || [];
+      const dayLabels = days
+        .map((idx) => {
+          const dayInfo = (itineraryDays || itinerary || [])[idx];
+          return dayInfo
+            ? `Day ${dayInfo.day}: ${dayInfo.title}`
+            : `Day ${idx + 1}`;
+        })
+        .join(", ");
+      addonRows += `<tr><td style="padding:6px 8px;font-size:13px;color:#374151;">${name}</td><td style="padding:6px 8px;font-size:12px;color:#6B7280;">${dayLabels || "All days"}</td></tr>`;
+    }
+    addonsHtml = `
+    <h3 style="color:#111827;font-size:14px;margin:0 0 8px;">Add-Ons Booked</h3>
+    <div style="background:#FEF9C3;border-radius:8px;padding:12px;margin-bottom:20px;border:1px solid #FDE68A;">
+      <table width="100%" style="border-collapse:collapse;">${addonRows}</table>
+      ${addonTotalPrice > 0 ? `<p style="margin:8px 0 0;font-size:13px;color:#92400E;font-weight:600;">Add-On Total: Rs.${Number(addonTotalPrice).toLocaleString("en-IN")}</p>` : ""}
+    </div>`;
+  }
 
   const content = `
     <h2 style="color:#111827;margin:0 0 8px;font-size:20px;">Booking Confirmed</h2>
@@ -146,6 +174,9 @@ const sendBookingConfirmation = async ({ to, userName, bookingDetails }) => {
     </table>`
         : ""
     }
+
+    <!-- Add-Ons -->
+    ${addonsHtml}
 
     <!-- Itinerary -->
     ${

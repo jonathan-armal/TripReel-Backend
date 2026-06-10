@@ -214,6 +214,38 @@ exports.createBooking = async (req, res) => {
       adultPrice: batch.adultPrice,
     };
 
+    // ── Compute addon surcharge for outside-city days ─────────────────────────
+    let addonSurcharge = 0;
+    const addonDaysData = req.body.addonDays || null;
+    const addonNames = addonDaysData ? Object.keys(addonDaysData) : [];
+    if (addonDaysData && pkg.outsideCityCharge > 0) {
+      for (const addonName of addonNames) {
+        const days = addonDaysData[addonName] || [];
+        for (const dayIdx of days) {
+          const dayInfo = pkg.itinerary[dayIdx];
+          if (dayInfo && dayInfo.isOutsideCity) {
+            addonSurcharge += pkg.outsideCityCharge;
+          }
+        }
+      }
+    }
+
+    // Compute total addon price (base + surcharge) for display
+    const ADDON_BASE_PRICE = 2000;
+    let addonTotalPrice = 0;
+    if (addonDaysData) {
+      for (const addonName of addonNames) {
+        const days = addonDaysData[addonName] || [];
+        for (const dayIdx of days) {
+          const dayInfo = pkg.itinerary[dayIdx];
+          const surcharge = dayInfo?.isOutsideCity
+            ? pkg.outsideCityCharge || 0
+            : 0;
+          addonTotalPrice += ADDON_BASE_PRICE + surcharge;
+        }
+      }
+    }
+
     // ── Create booking — auto-confirmed (payment simulated) ──────────────────
     const booking = await TripBooking.create({
       userId: req.user._id,
@@ -231,6 +263,10 @@ exports.createBooking = async (req, res) => {
         : [],
       pricing,
       snapshot,
+      addonDays: addonDaysData,
+      addonSurcharge,
+      addonNames,
+      addonTotalPrice,
     });
 
     // ── Side effects — increment seats + bookingCount immediately ──────────
@@ -239,6 +275,7 @@ exports.createBooking = async (req, res) => {
       $inc: { bookingCount: numSeats },
     });
     // NOTE: Wallet credit happens via cron 2 days after trip endDate (not now)
+    // outsideCityCharge is also credited at the same time as package earnings (via cron)
 
     // Auto-create chat conversation for this booking
     const Conversation = require("../models/Conversation");
@@ -337,6 +374,10 @@ exports.createBooking = async (req, res) => {
           operatorName: operator?.businessName || operator?.contactName,
           operatorPhone: operator?.phone,
           paymentId: req.body.paymentId || "",
+          addonNames: addonNames || [],
+          addonTotalPrice: addonTotalPrice || 0,
+          addonDays: addonDaysData,
+          itineraryDays: pkg.itinerary || [],
         },
       });
     } catch (emailErr) {

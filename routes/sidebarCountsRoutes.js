@@ -35,11 +35,9 @@ router.get("/admin", protect, restrictTo("admin"), async (req, res) => {
     ] = await Promise.all([
       Package.countDocuments({
         status: "PENDING",
-        createdAt: { $gt: lastSeenPackages },
       }),
       Operator.countDocuments({
         onboardingState: "PENDING_APPROVAL",
-        createdAt: { $gt: lastSeenOperators },
       }),
       TripBooking.countDocuments({
         createdAt: { $gt: lastSeenBookings },

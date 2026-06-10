@@ -118,6 +118,7 @@ exports.verifyPayment = async (req, res) => {
         travelers: req.body.travelers || [],
         paymentId: razorpay_payment_id,
         razorpayOrderId: razorpay_order_id,
+        addonDays: req.body.addonDays || null,
       },
     };
 

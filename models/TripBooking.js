@@ -136,6 +136,27 @@ const tripBookingSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+
+    // Addon day selections — { addonName: [dayIndex, ...] }
+    addonDays: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    // Pre-computed outside-city surcharge to credit operator (via cron with package earnings)
+    addonSurcharge: {
+      type: Number,
+      default: 0,
+    },
+    // Addon names selected (for display purposes)
+    addonNames: {
+      type: [String],
+      default: [],
+    },
+    // Total addon price paid (base + surcharges)
+    addonTotalPrice: {
+      type: Number,
+      default: 0,
+    },
   },
   { timestamps: true },
 );
