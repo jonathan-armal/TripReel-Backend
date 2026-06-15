@@ -67,6 +67,13 @@ const operatorSchema = new mongoose.Schema(
     ifscCode: { type: String, trim: true },
     upiId: { type: String, trim: true }, // optional
 
+    // ── RazorpayX payout references (cached so we don't recreate each time) ──
+    razorpayContactId: { type: String, default: "" },
+    razorpayFundAccountId: { type: String, default: "" },
+    // The bank/UPI snapshot the fund account was built from — if bank details
+    // change, we recreate the fund account.
+    razorpayFundFingerprint: { type: String, default: "" },
+
     // ── Step 6: Business Documents ────────────────────────────────────────
     // company docs
     gstNumber: { type: String, trim: true }, // optional

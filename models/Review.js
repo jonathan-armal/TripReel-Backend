@@ -52,7 +52,14 @@ const reviewSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-// One review per user per package
-reviewSchema.index({ packageId: 1, userId: 1 }, { unique: true });
+// One review per booking (a user who books the same package multiple times
+// can leave a separate review for each completed booking — all are averaged).
+reviewSchema.index(
+  { bookingRef: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { bookingRef: { $type: "objectId" } },
+  },
+);
 
 module.exports = mongoose.model("Review", reviewSchema);

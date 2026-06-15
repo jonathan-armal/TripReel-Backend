@@ -17,6 +17,7 @@ router.get("/admin", protect, restrictTo("admin"), async (req, res) => {
     const { Operator } = require("../models/Operator");
     const TripBooking = require("../models/TripBooking");
     const Notification = require("../models/Notification");
+    const mongoose = require("mongoose");
 
     const adminId = req.user._id;
 
@@ -27,11 +28,15 @@ router.get("/admin", protect, restrictTo("admin"), async (req, res) => {
         getLastSeen(adminId, "admin", "trip-bookings"),
       ]);
 
+    const Report = mongoose.models.Report;
+
     const [
       pendingPackages,
       pendingOperators,
       newBookings,
       unreadNotifications,
+      failedRefunds,
+      pendingReports,
     ] = await Promise.all([
       Package.countDocuments({
         status: "PENDING",
@@ -46,6 +51,14 @@ router.get("/admin", protect, restrictTo("admin"), async (req, res) => {
         recipientType: "admin",
         read: false,
       }),
+      // Refunds that need admin attention (auto-refund failed or needs manual action)
+      TripBooking.countDocuments({
+        refundStatus: { $in: ["FAILED", "MANUAL"] },
+      }),
+      // Open / in-progress user reports
+      Report
+        ? Report.countDocuments({ status: { $in: ["open", "in_progress"] } })
+        : Promise.resolve(0),
     ]);
 
     res.json({
@@ -55,6 +68,8 @@ router.get("/admin", protect, restrictTo("admin"), async (req, res) => {
         pendingOperators,
         newBookings,
         unreadNotifications,
+        failedRefunds,
+        pendingReports,
       },
     });
   } catch (err) {
@@ -89,6 +104,7 @@ router.get("/operator", operatorProtect, async (req, res) => {
   try {
     const TripBooking = require("../models/TripBooking");
     const Notification = require("../models/Notification");
+    const Conversation = require("../models/Conversation");
 
     const operatorId = req.operator._id;
 
@@ -98,7 +114,7 @@ router.get("/operator", operatorProtect, async (req, res) => {
       "bookings",
     );
 
-    const [newBookings, unreadNotifications] = await Promise.all([
+    const [newBookings, unreadNotifications, msgAgg] = await Promise.all([
       TripBooking.countDocuments({
         operatorId,
         createdAt: { $gt: lastSeenBookings },
@@ -108,13 +124,21 @@ router.get("/operator", operatorProtect, async (req, res) => {
         recipientType: "operator",
         read: false,
       }),
+      // Total unread chat messages across this operator's conversations
+      Conversation.aggregate([
+        { $match: { operatorId } },
+        { $group: { _id: null, total: { $sum: "$unreadOperator" } } },
+      ]),
     ]);
+
+    const unreadMessages = msgAgg[0]?.total || 0;
 
     res.json({
       success: true,
       counts: {
         newBookings,
         unreadNotifications,
+        unreadMessages,
       },
     });
   } catch (err) {

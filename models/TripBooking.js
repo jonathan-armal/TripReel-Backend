@@ -6,6 +6,9 @@ const pricingSchema = new mongoose.Schema(
     adultPrice: { type: Number, default: 0 },
     seats: { type: Number, default: 1 },
     subtotal: { type: Number, default: 0 },
+    // Explicit breakdown for accurate refund math
+    fareSubtotal: { type: Number, default: 0 }, // package fare only (adult+child), pre-addon, pre-gst
+    addonAmount: { type: Number, default: 0 }, // total addon (base + surcharge), held by platform
     platformFeePercent: { type: Number, default: 0 },
     platformFeeAmount: { type: Number, default: 0 },
     gstPercent: { type: Number, default: 5 },
@@ -17,6 +20,18 @@ const pricingSchema = new mongoose.Schema(
     couponCode: { type: String, default: "" },
     // What the operator receives (totalAmount - platformFeeAmount)
     operatorAmount: { type: Number, default: 0 },
+  },
+  { _id: false },
+);
+
+// Breakdown of how a refund was split (for transparency + admin log)
+const refundBreakdownSchema = new mongoose.Schema(
+  {
+    fareRefund: { type: Number, default: 0 }, // fare portion returned to user
+    gstRefund: { type: Number, default: 0 }, // gst portion returned to user
+    addonRefund: { type: Number, default: 0 }, // addon returned to user (if not dispatched)
+    operatorRetained: { type: Number, default: 0 }, // cancellation money credited to operator (after platform fee)
+    platformRetained: { type: Number, default: 0 }, // platform's share of the retained amount + retained gst
   },
   { _id: false },
 );
@@ -121,7 +136,7 @@ const tripBookingSchema = new mongoose.Schema(
     },
     cancelledBy: {
       type: String,
-      enum: ["user", "admin", "system", ""],
+      enum: ["user", "admin", "operator", "system", ""],
       default: "",
     },
     cancelledAt: {
@@ -136,6 +151,20 @@ const tripBookingSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    // Refund processing status
+    refundStatus: {
+      type: String,
+      enum: ["NONE", "PROCESSING", "REFUNDED", "FAILED", "MANUAL"],
+      default: "NONE",
+    },
+    refundId: { type: String, default: "" }, // Razorpay refund id
+    refundedAt: { type: Date, default: null },
+    refundError: { type: String, default: "" },
+    refundBreakdown: refundBreakdownSchema,
+
+    // Razorpay references (needed to issue refunds)
+    razorpayPaymentId: { type: String, default: "" },
+    razorpayOrderId: { type: String, default: "" },
 
     // Addon day selections — { addonName: [dayIndex, ...] }
     addonDays: {
@@ -157,6 +186,26 @@ const tripBookingSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    // Tracks whether operator wallet has been credited (escrow released 2 days after trip end)
+    walletReleased: {
+      type: Boolean,
+      default: false,
+    },
+
+    // Addon (Snapja) money is HELD by platform until the booking is locked-in,
+    // then dispatched to Snapja. If cancelled before dispatch → fully refundable.
+    addonHeld: {
+      type: Boolean,
+      default: false,
+    },
+    addonDispatched: {
+      type: Boolean,
+      default: false,
+    },
+    addonDispatchedAt: {
+      type: Date,
+      default: null,
+    },
   },
   { timestamps: true },
 );
@@ -169,5 +218,16 @@ tripBookingSchema.pre("save", async function (next) {
   }
   next();
 });
+
+// SECURITY: prevent two bookings being minted from the same Razorpay payment
+// (guards against a race in the verify endpoint's idempotency check). Partial
+// index so the many legacy bookings with empty payment id don't collide.
+tripBookingSchema.index(
+  { razorpayPaymentId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { razorpayPaymentId: { $gt: "" } },
+  },
+);
 
 module.exports = mongoose.model("TripBooking", tripBookingSchema);

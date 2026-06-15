@@ -4,6 +4,122 @@ const Batch = require("../models/Batch");
 // Helper: stagger notifications to avoid sending all at once
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const NOTIFICATION_STAGGER_MS = 500; // 500ms gap between each push notification
+const ADDON_BASE_PRICE = 2000; // ₹/day/service sent to Snapja
+const SNAPJA_API = "https://api.snapja.com/api/tripreel/bookings";
+const SNAPJA_API_KEY = process.env.SNAPJA_API_KEY || "tripreel_snapja_2025";
+
+// Resolve refund % for a given trip start date from admin slabs (0 = no-refund window)
+async function refundPercentForDate(startDate) {
+  if (!startDate) return 0;
+  const { getSetting } = require("./platformSettingsController");
+  let slabs = [
+    { daysBeforeTrip: 7, refundPercent: 90 },
+    { daysBeforeTrip: 3, refundPercent: 50 },
+    { daysBeforeTrip: 0, refundPercent: 0 },
+  ];
+  try {
+    const s = await getSetting("cancellation_refund_slabs");
+    if (Array.isArray(s) && s.length > 0) slabs = s;
+  } catch {}
+  slabs.sort((a, b) => b.daysBeforeTrip - a.daysBeforeTrip);
+  const days = Math.ceil(
+    (new Date(startDate) - new Date()) / (1000 * 60 * 60 * 24),
+  );
+  for (const slab of slabs) {
+    if (days >= slab.daysBeforeTrip) return slab.refundPercent;
+  }
+  return 0;
+}
+
+/**
+ * Job: dispatch held Snapja addon money once a booking is locked-in
+ * (entered the no-refund window). Sends one Snapja booking per service per day.
+ */
+async function runSnapjaDispatch() {
+  const results = { dispatched: 0, callsMade: 0, errors: [] };
+  try {
+    const Package = require("../models/Package");
+    const User = require("../models/User");
+
+    const bookings = await TripBooking.find({
+      status: "CONFIRMED",
+      addonHeld: true,
+      addonDispatched: { $ne: true },
+    }).populate("batchId", "startDate");
+
+    for (const booking of bookings) {
+      try {
+        const startDate = booking.batchId?.startDate;
+        if (!startDate) continue;
+        // Dispatch only once the booking is non-refundable (no-refund window)
+        const pct = await refundPercentForDate(startDate);
+        if (pct > 0) continue; // still refundable — keep holding
+        if (new Date(startDate) < new Date()) continue; // trip already started/passed
+
+        const pkg = await Package.findById(booking.packageId).select(
+          "itinerary location title",
+        );
+        const user = await User.findById(booking.userId).select(
+          "name phone email",
+        );
+        const addonDays = booking.addonDays || {};
+
+        for (const addonName of Object.keys(addonDays)) {
+          const serviceType = addonName.toLowerCase().includes("photographer")
+            ? "photographer"
+            : "reelmaker";
+          for (const dayIdx of addonDays[addonName] || []) {
+            const dayInfo = pkg?.itinerary?.[dayIdx];
+            const actualDate = new Date(startDate);
+            actualDate.setDate(actualDate.getDate() + dayIdx);
+            const location =
+              dayInfo?.pickupPoint || pkg?.location || pkg?.title || "India";
+            try {
+              await fetch(SNAPJA_API, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-API-Key": SNAPJA_API_KEY,
+                },
+                body: JSON.stringify({
+                  service_type: serviceType,
+                  location,
+                  price: ADDON_BASE_PRICE,
+                  duration: 1,
+                  date: actualDate.toISOString().split("T")[0],
+                  time: "10:00",
+                  booking_type: "scheduled",
+                  customer_name: user?.name || "TripReel User",
+                  customer_phone: user?.phone || "",
+                  customer_email: user?.email || "",
+                  notes: `TripReel: ${pkg?.title || "Trip"} — ${addonName} — Day ${dayIdx + 1} — Booking ${booking.bookingId}`,
+                  timezone: "Asia/Kolkata",
+                  auto_confirm_payment: true,
+                }),
+              });
+              results.callsMade++;
+            } catch (e) {
+              results.errors.push(
+                `Snapja ${booking.bookingId} day ${dayIdx + 1}: ${e.message}`,
+              );
+            }
+          }
+        }
+
+        booking.addonDispatched = true;
+        booking.addonDispatchedAt = new Date();
+        await booking.save();
+        results.dispatched++;
+      } catch (e) {
+        results.errors.push(`Dispatch ${booking.bookingId}: ${e.message}`);
+      }
+    }
+  } catch (err) {
+    results.errors.push(`Snapja dispatch error: ${err.message}`);
+  }
+  return results;
+}
+exports.runSnapjaDispatch = runSnapjaDispatch;
 
 /**
  * Cron Job Logic
@@ -37,8 +153,8 @@ async function runCronJobs() {
           const OperatorWallet = require("../models/OperatorWallet");
           const WalletTransaction = require("../models/WalletTransaction");
 
-          const totalCredit =
-            booking.pricing.operatorAmount + (booking.addonSurcharge || 0);
+          // operatorAmount already includes the outside-city addon surcharge
+          const totalCredit = booking.pricing.operatorAmount;
 
           const wallet = await OperatorWallet.findOneAndUpdate(
             { operatorId: booking.operatorId },
@@ -403,7 +519,25 @@ async function runCronJobs() {
 // POST /api/admin/run-cron  — manual trigger (admin only)
 exports.runCron = async (req, res) => {
   try {
-    const results = await runCronJobs();
+    // Run the new split jobs (avoids double wallet-credit from legacy runCronJobs)
+    const auto = await exports.runAutoCompleteAndCancel();
+    const reminders = await exports.runTripReminders();
+    const reviews = await exports.runReviewReminders();
+    const wishlist = await exports.runWishlistAlerts();
+    const results = {
+      completed: auto.completed,
+      cancelled: auto.cancelled,
+      walletReleased: auto.walletReleased,
+      reminders: reminders.reminders,
+      reviewReminders: reviews.reviewReminders,
+      urgencyAlerts: wishlist.urgencyAlerts,
+      errors: [
+        ...auto.errors,
+        ...reminders.errors,
+        ...reviews.errors,
+        ...wishlist.errors,
+      ],
+    };
     res.json({
       success: true,
       message: `Cron complete. ${results.completed} completed, ${results.cancelled} cancelled.`,
@@ -419,29 +553,61 @@ exports.runCronJobs = runCronJobs;
 
 // ── Split exports for separate scheduling ─────────────────────────────────────
 
-// Job 1 + 2 only: auto-complete and auto-cancel (no push notifications)
+// Job 1 + 2 only: auto-complete and auto-cancel + escrow wallet release
 exports.runAutoCompleteAndCancel = async function () {
   const now = new Date();
   const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
   const results = { completed: 0, cancelled: 0, walletReleased: 0, errors: [] };
 
   try {
+    const { notifyUser } = require("./notificationController");
+
+    // ── Step 1: Mark CONFIRMED → COMPLETED as soon as the trip endDate passes ──
     const confirmedBookings = await TripBooking.find({
       status: "CONFIRMED",
     }).populate("batchId", "endDate");
 
     for (const booking of confirmedBookings) {
       try {
-        if (booking.batchId && booking.batchId.endDate < twoDaysAgo) {
+        if (booking.batchId && booking.batchId.endDate < now) {
           booking.status = "COMPLETED";
           booking.hasReviewed = false;
           await booking.save();
           results.completed++;
 
+          // Notify user right away — trip done, rate it
+          const snap = booking.snapshot || {};
+          await delay(NOTIFICATION_STAGGER_MS);
+          notifyUser(
+            booking.userId,
+            "Trip Completed! ⭐",
+            `Your trip to ${snap.packageTitle || "destination"} is complete. Rate your experience!`,
+            {
+              type: "trip_completed",
+              bookingId: booking._id.toString(),
+              screen: "ReviewScreen",
+            },
+          );
+        }
+      } catch (e) {
+        results.errors.push(`Auto-complete ${booking.bookingId}: ${e.message}`);
+      }
+    }
+
+    // ── Step 2: Release operator wallet 2 days after trip end (escrow) ──────────
+    const completedUnpaid = await TripBooking.find({
+      status: "COMPLETED",
+      walletReleased: { $ne: true },
+    }).populate("batchId", "endDate");
+
+    for (const booking of completedUnpaid) {
+      try {
+        if (booking.batchId && booking.batchId.endDate < twoDaysAgo) {
           const OperatorWallet = require("../models/OperatorWallet");
           const WalletTransaction = require("../models/WalletTransaction");
-          const totalCredit =
-            booking.pricing.operatorAmount + (booking.addonSurcharge || 0);
+          const { notifyOperator } = require("./notificationController");
+          // operatorAmount already includes the outside-city addon surcharge
+          const totalCredit = booking.pricing.operatorAmount;
 
           const wallet = await OperatorWallet.findOneAndUpdate(
             { operatorId: booking.operatorId },
@@ -462,21 +628,11 @@ exports.runAutoCompleteAndCancel = async function () {
             description: `Booking ${booking.bookingId} — funds released after trip completion${surchargeNote}`,
             balanceAfter: wallet.balance,
           });
+
+          booking.walletReleased = true;
+          await booking.save();
           results.walletReleased++;
 
-          // Send push notifications for completion
-          const {
-            notifyUser,
-            notifyOperator,
-          } = require("./notificationController");
-          const snap = booking.snapshot || {};
-          await delay(NOTIFICATION_STAGGER_MS);
-          notifyUser(
-            booking.userId,
-            "Trip Completed! ⭐",
-            `Your trip to ${snap.packageTitle || "destination"} is complete. Rate your experience!`,
-            { type: "trip_completed", bookingId: booking._id.toString() },
-          );
           await delay(NOTIFICATION_STAGGER_MS);
           notifyOperator(
             booking.operatorId,
@@ -486,11 +642,13 @@ exports.runAutoCompleteAndCancel = async function () {
           );
         }
       } catch (e) {
-        results.errors.push(`Auto-complete ${booking.bookingId}: ${e.message}`);
+        results.errors.push(
+          `Wallet release ${booking.bookingId}: ${e.message}`,
+        );
       }
     }
 
-    // Auto-cancel expired pending bookings
+    // ── Step 3: Auto-cancel expired pending bookings ────────────────────────────
     const pendingBookings = await TripBooking.find({
       status: "PENDING",
     }).populate("batchId", "bookingDeadline");

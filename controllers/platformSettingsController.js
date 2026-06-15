@@ -77,6 +77,35 @@ exports.getPublicSettings = async (req, res) => {
 };
 
 // PATCH /api/settings/:key  (admin — update any setting)
+// Build a human-readable cancellation policy sentence from refund slabs
+function generatePolicyText(slabs) {
+  if (!Array.isArray(slabs) || slabs.length === 0) {
+    return "Cancellation refunds are processed as per platform policy.";
+  }
+  const sorted = [...slabs].sort((a, b) => b.daysBeforeTrip - a.daysBeforeTrip);
+  const parts = sorted.map((slab, i) => {
+    const days = Number(slab.daysBeforeTrip) || 0;
+    const pct = Number(slab.refundPercent) || 0;
+    const upper = sorted[i - 1];
+    let range;
+    if (i === 0) {
+      range = `${days}+ days before departure`;
+    } else if (days === 0) {
+      range = `less than ${upper.daysBeforeTrip} days before departure or no-show`;
+    } else {
+      range = `${days}-${upper.daysBeforeTrip - 1} days before departure`;
+    }
+    const refundText = pct === 0 ? "no refund" : `${pct}% refund`;
+    // Capitalize first letter for the opening sentence
+    const sentence =
+      i === 0
+        ? `Cancel ${range}: ${refundText}.`
+        : `Cancel ${range}: ${refundText}.`;
+    return sentence;
+  });
+  return parts.join(" ");
+}
+
 exports.updateSetting = async (req, res) => {
   try {
     const { value } = req.body;
@@ -88,6 +117,7 @@ exports.updateSetting = async (req, res) => {
 
     const numVal = Number(value);
     const numericKeys = ["platform_fee_percent", "gst_percent"];
+    const arrayKeys = ["cancellation_refund_slabs"];
 
     let finalValue = value;
 
@@ -104,6 +134,14 @@ exports.updateSetting = async (req, res) => {
           .json({ success: false, message: "Platform fee cannot exceed 100%" });
       }
       finalValue = numVal;
+    } else if (arrayKeys.includes(req.params.key)) {
+      // Array settings (refund slabs) — store as-is
+      if (!Array.isArray(value)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "value must be an array" });
+      }
+      finalValue = value;
     } else {
       // String settings (policies, terms) — just store as-is
       finalValue = String(value).trim();
@@ -114,6 +152,16 @@ exports.updateSetting = async (req, res) => {
       { value: finalValue, updatedBy: req.user._id },
       { new: true, upsert: true },
     );
+
+    // Auto-generate the user-facing cancellation policy text from the slabs
+    if (req.params.key === "cancellation_refund_slabs") {
+      const policyText = generatePolicyText(finalValue);
+      await PlatformSettings.findOneAndUpdate(
+        { key: "default_cancellation_policy" },
+        { value: policyText, updatedBy: req.user._id },
+        { upsert: true },
+      );
+    }
 
     res.json({ success: true, setting });
   } catch (err) {

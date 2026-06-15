@@ -16,7 +16,14 @@ initSocket(server);
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(cors());
-app.use(express.json({ limit: "20mb" }));
+app.use(
+  express.json({
+    limit: "20mb",
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  }),
+);
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 
 // Static folder for uploaded images and videos
@@ -95,56 +102,111 @@ mongoose
       runTripReminders,
       runReviewReminders,
       runWishlistAlerts,
+      runSnapjaDispatch,
       runCronJobs,
     } = require("./controllers/cronController");
 
-    // 12:00 AM (Midnight) — Auto-complete trips + auto-cancel expired bookings + wallet credits
-    cron.schedule("0 0 * * *", async () => {
-      try {
-        const result = await runAutoCompleteAndCancel();
-        console.log(
-          `✅ Cron (midnight): ${result.completed} completed, ${result.cancelled} cancelled, ${result.walletReleased} wallets credited`,
-        );
-      } catch (err) {
-        console.error("❌ Cron midnight error:", err.message);
-      }
-    });
+    // 12:00 AM IST (Midnight) — Auto-complete trips + auto-cancel expired bookings + wallet credits
+    cron.schedule(
+      "0 0 * * *",
+      async () => {
+        try {
+          const result = await runAutoCompleteAndCancel();
+          console.log(
+            `✅ Cron (midnight): ${result.completed} completed, ${result.cancelled} cancelled, ${result.walletReleased} wallets credited`,
+          );
+        } catch (err) {
+          console.error("❌ Cron midnight error:", err.message);
+        }
+      },
+      { timezone: "Asia/Kolkata" },
+    );
 
-    // 9:00 AM — Trip countdown reminders (7d, 3d, 1d, today)
-    cron.schedule("0 9 * * *", async () => {
-      try {
-        const result = await runTripReminders();
-        console.log(`✅ Cron (9AM): ${result.reminders} trip reminders sent`);
-      } catch (err) {
-        console.error("❌ Cron 9AM error:", err.message);
-      }
-    });
+    // Every 2 hours — keep trip status fresh (mark COMPLETED soon after trip ends)
+    cron.schedule(
+      "0 */2 * * *",
+      async () => {
+        try {
+          const result = await runAutoCompleteAndCancel();
+          if (result.completed || result.walletReleased || result.cancelled) {
+            console.log(
+              `✅ Cron (2h status sync): ${result.completed} completed, ${result.cancelled} cancelled, ${result.walletReleased} wallets credited`,
+            );
+          }
+        } catch (err) {
+          console.error("❌ Cron 2h status sync error:", err.message);
+        }
+      },
+      { timezone: "Asia/Kolkata" },
+    );
 
-    // 11:00 AM — Review reminders (day 1, 2, 3 after trip end)
-    cron.schedule("0 11 * * *", async () => {
-      try {
-        const result = await runReviewReminders();
-        console.log(
-          `✅ Cron (11AM): ${result.reviewReminders} review reminders sent`,
-        );
-      } catch (err) {
-        console.error("❌ Cron 11AM error:", err.message);
-      }
-    });
+    // Every 3 hours — dispatch held Snapja addon money for locked-in bookings
+    cron.schedule(
+      "0 */3 * * *",
+      async () => {
+        try {
+          const result = await runSnapjaDispatch();
+          if (result.dispatched) {
+            console.log(
+              `✅ Cron (Snapja dispatch): ${result.dispatched} bookings, ${result.callsMade} Snapja calls`,
+            );
+          }
+        } catch (err) {
+          console.error("❌ Cron Snapja dispatch error:", err.message);
+        }
+      },
+      { timezone: "Asia/Kolkata" },
+    );
 
-    // 6:00 PM — Wishlist urgency alerts (low seats, deadline tomorrow)
-    cron.schedule("0 18 * * *", async () => {
-      try {
-        const result = await runWishlistAlerts();
-        console.log(
-          `✅ Cron (6PM): ${result.urgencyAlerts} wishlist alerts sent`,
-        );
-      } catch (err) {
-        console.error("❌ Cron 6PM error:", err.message);
-      }
-    });
+    // 9:00 AM IST — Trip countdown reminders (7d, 3d, 1d, today)
+    cron.schedule(
+      "0 9 * * *",
+      async () => {
+        try {
+          const result = await runTripReminders();
+          console.log(`✅ Cron (9AM): ${result.reminders} trip reminders sent`);
+        } catch (err) {
+          console.error("❌ Cron 9AM error:", err.message);
+        }
+      },
+      { timezone: "Asia/Kolkata" },
+    );
 
-    console.log("⏰ Cron jobs scheduled: midnight, 9AM, 11AM, 6PM");
+    // 11:00 AM IST — Review reminders (day 1, 2, 3 after trip end)
+    cron.schedule(
+      "0 11 * * *",
+      async () => {
+        try {
+          const result = await runReviewReminders();
+          console.log(
+            `✅ Cron (11AM): ${result.reviewReminders} review reminders sent`,
+          );
+        } catch (err) {
+          console.error("❌ Cron 11AM error:", err.message);
+        }
+      },
+      { timezone: "Asia/Kolkata" },
+    );
+
+    // 6:00 PM IST — Wishlist urgency alerts (low seats, deadline tomorrow)
+    cron.schedule(
+      "0 18 * * *",
+      async () => {
+        try {
+          const result = await runWishlistAlerts();
+          console.log(
+            `✅ Cron (6PM): ${result.urgencyAlerts} wishlist alerts sent`,
+          );
+        } catch (err) {
+          console.error("❌ Cron 6PM error:", err.message);
+        }
+      },
+      { timezone: "Asia/Kolkata" },
+    );
+
+    console.log(
+      "⏰ Cron jobs scheduled (IST): midnight, every 2h, 9AM, 11AM, 6PM",
+    );
   })
   .catch((err) => {
     console.error("❌ MongoDB connection error:", err.message);

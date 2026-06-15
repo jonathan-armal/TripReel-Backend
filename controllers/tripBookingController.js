@@ -8,24 +8,122 @@ const { getSetting } = require("./platformSettingsController");
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function calcPricing({ adultPrice, seats, platformFeePercent, gstPercent }) {
-  const subtotal = Math.round(adultPrice * seats);
-  const platformFeeAmount = Math.round((subtotal * platformFeePercent) / 100);
-  const gstAmount = Math.round((subtotal * gstPercent) / 100);
-  const totalAmount = subtotal + gstAmount;
-  const operatorAmount = totalAmount - platformFeeAmount;
+function calcPricing({
+  adultPrice,
+  seats,
+  platformFeePercent,
+  gstPercent,
+  addonAmount = 0,
+  addonSurcharge = 0,
+  discountAmount = 0,
+}) {
+  const fareSubtotal = Math.round(adultPrice * seats);
+  const netFare = Math.max(0, fareSubtotal - discountAmount); // discount applies to fare only
+  const subtotal = fareSubtotal + addonAmount;
+  // GST charged on (discounted fare + addon)
+  const gstAmount = Math.round(((netFare + addonAmount) * gstPercent) / 100);
+  // Platform fee is taken on the operator's fare only (not GST, not Snapja base)
+  const platformFeeAmount = Math.round((netFare * platformFeePercent) / 100);
+  const totalAmount = netFare + addonAmount + gstAmount;
+  // Operator earns: net fare minus platform fee, plus their outside-city surcharge.
+  // (The ₹2000/day Snapja base and the GST are NOT operator earnings.)
+  const operatorAmount = netFare - platformFeeAmount + addonSurcharge;
   return {
     adultPrice,
     seats,
+    fareSubtotal,
+    addonAmount,
     subtotal,
     platformFeePercent,
     platformFeeAmount,
     gstPercent,
     gstAmount,
     totalAmount,
+    discountAmount,
     operatorAmount,
   };
 }
+
+// Read-only: compute the authoritative booking total server-side (no DB mutation).
+// Used by payment createOrder so the charged amount can NEVER be set by the client.
+async function computeAuthoritativePricing({
+  packageId,
+  batchId,
+  seats,
+  couponCode,
+  addonDays,
+}) {
+  const numSeats = Math.max(1, Number(seats) || 1);
+  const batch = await Batch.findById(batchId);
+  if (!batch || !batch.isActive) throw new Error("Batch not found or inactive");
+  const pkg = await Package.findById(packageId);
+  if (!pkg) throw new Error("Package not found");
+  if (String(batch.packageId) !== String(packageId))
+    throw new Error("Batch does not belong to this package");
+
+  const platformFeePercent = (await getSetting("platform_fee_percent")) ?? 10;
+  const gstPercent = (await getSetting("gst_percent")) ?? 5;
+
+  // Addons
+  const ADDON_BASE_PRICE = 2000;
+  let addonSurcharge = 0;
+  let addonTotalPrice = 0;
+  if (addonDays) {
+    for (const name of Object.keys(addonDays)) {
+      for (const dayIdx of addonDays[name] || []) {
+        const dayInfo = pkg.itinerary[dayIdx];
+        const sc = dayInfo?.isOutsideCity ? pkg.outsideCityCharge || 0 : 0;
+        addonSurcharge += sc;
+        addonTotalPrice += ADDON_BASE_PRICE + sc;
+      }
+    }
+  }
+
+  // Coupon (read-only — no usage increment here)
+  const code = (couponCode || "").trim().toUpperCase();
+  let discountAmount = 0;
+  const fareSubtotalRaw = Math.round(batch.adultPrice * numSeats);
+  if (code) {
+    const Coupon = require("../models/Coupon");
+    const now = new Date();
+    const coupon = await Coupon.findOne({
+      batchId,
+      code,
+      isActive: true,
+      validFrom: { $lte: now },
+      validUntil: { $gte: now },
+    });
+    if (coupon) {
+      const withinUsage =
+        coupon.usageLimit === 0 || coupon.usedCount < coupon.usageLimit;
+      const meetsGuests =
+        coupon.minGuests === 0 || numSeats >= coupon.minGuests;
+      const meetsOrder =
+        coupon.minOrderAmount === 0 || fareSubtotalRaw >= coupon.minOrderAmount;
+      if (withinUsage && meetsGuests && meetsOrder) {
+        if (coupon.type === "percentage") {
+          discountAmount = Math.round((fareSubtotalRaw * coupon.value) / 100);
+          if (coupon.maxDiscount > 0 && discountAmount > coupon.maxDiscount)
+            discountAmount = coupon.maxDiscount;
+        } else {
+          discountAmount = Math.min(coupon.value, fareSubtotalRaw);
+        }
+      }
+    }
+  }
+
+  const pricing = calcPricing({
+    adultPrice: batch.adultPrice,
+    seats: numSeats,
+    platformFeePercent,
+    gstPercent,
+    addonAmount: addonTotalPrice,
+    addonSurcharge,
+    discountAmount,
+  });
+  return pricing.totalAmount;
+}
+exports.computeAuthoritativePricing = computeAuthoritativePricing;
 
 async function creditOperatorWallet(
   operatorId,
@@ -73,11 +171,190 @@ async function debitOperatorWallet(operatorId, amount, bookingId, description) {
   }
 }
 
+// Resolve the refund % for a user cancellation from the admin-configured slabs
+async function resolveRefundPercent(startDate) {
+  let refundPercent = 0;
+  if (!startDate) return 0;
+  const now = new Date();
+  const tripStart = new Date(startDate);
+  const daysBeforeTrip = Math.ceil((tripStart - now) / (1000 * 60 * 60 * 24));
+
+  let slabs = [
+    { daysBeforeTrip: 7, refundPercent: 90 },
+    { daysBeforeTrip: 3, refundPercent: 50 },
+    { daysBeforeTrip: 0, refundPercent: 0 },
+  ];
+  try {
+    const slabsSetting = await getSetting("cancellation_refund_slabs");
+    if (Array.isArray(slabsSetting) && slabsSetting.length > 0)
+      slabs = slabsSetting;
+  } catch {}
+
+  slabs.sort((a, b) => b.daysBeforeTrip - a.daysBeforeTrip);
+  for (const slab of slabs) {
+    if (daysBeforeTrip >= slab.daysBeforeTrip) {
+      refundPercent = slab.refundPercent;
+      break;
+    }
+  }
+  return refundPercent;
+}
+
+/**
+ * Core cancellation + refund processor — used by user, operator, and admin cancels.
+ *
+ * @param {object} booking  the TripBooking document (already loaded)
+ * @param {object} opts
+ *   - cancelledBy: 'user' | 'operator' | 'admin' | 'system'
+ *   - reason: string
+ *   - fullRefund: boolean (operator/admin cancel → 100% refund regardless of slab)
+ * @returns {Promise<object>} summary { refundAmount, refundPercent, breakdown, refundStatus }
+ */
+async function processCancellationRefund(
+  booking,
+  { cancelledBy, reason, fullRefund },
+) {
+  const p = booking.pricing || {};
+  const fareSubtotal = Number(p.fareSubtotal) || 0;
+  const discountAmount = Number(p.discountAmount) || 0;
+  const netFare = Math.max(0, fareSubtotal - discountAmount);
+  const gst = Number(p.gstAmount) || 0;
+  const addon = Number(p.addonAmount) || 0;
+  const platformFeePercent = Number(p.platformFeePercent) || 0;
+
+  // ── Determine refund percentage ──────────────────────────────────────────
+  const refundPercent = fullRefund
+    ? 100
+    : await resolveRefundPercent(booking.snapshot?.startDate);
+
+  // ── Compute the split ──────────────────────────────────────────────────────
+  const fareRefund = Math.round((netFare * refundPercent) / 100);
+  const gstRefund = Math.round((gst * refundPercent) / 100);
+  // Addon: refundable only while still held (not yet dispatched to Snapja)
+  const addonRefundable = !booking.addonDispatched;
+  const addonRefund = fullRefund
+    ? addon // operator/admin cancel → always refund addon (platform absorbs if dispatched)
+    : addonRefundable
+      ? addon
+      : 0;
+
+  const retainedFare = netFare - fareRefund;
+  const platformFeeOnRetained = fullRefund
+    ? 0
+    : Math.round((retainedFare * platformFeePercent) / 100);
+  const operatorRetained = fullRefund
+    ? 0
+    : retainedFare - platformFeeOnRetained;
+  const platformRetained = fullRefund
+    ? 0
+    : platformFeeOnRetained + (gst - gstRefund);
+
+  const userRefund = fareRefund + gstRefund + addonRefund;
+
+  const breakdown = {
+    fareRefund,
+    gstRefund,
+    addonRefund,
+    operatorRetained,
+    platformRetained,
+  };
+
+  // ── Update booking record ───────────────────────────────────────────────
+  booking.status = "CANCELLED";
+  booking.cancelReason = reason || `Cancelled by ${cancelledBy}`;
+  booking.cancelledBy = cancelledBy;
+  booking.cancelledAt = new Date();
+  booking.refundPercent = refundPercent;
+  booking.refundAmount = userRefund;
+  booking.refundBreakdown = breakdown;
+
+  // ── Issue Razorpay refund (or flag manual if no payment id) ───────────────
+  if (userRefund > 0) {
+    if (booking.razorpayPaymentId) {
+      const { refundPayment } = require("../utils/razorpayRefund");
+      const result = await refundPayment(
+        booking.razorpayPaymentId,
+        userRefund,
+        { bookingId: booking.bookingId, reason: reason || cancelledBy },
+      );
+      if (result.success) {
+        booking.refundId = result.refundId || "";
+        booking.refundStatus =
+          result.status === "processed" ? "REFUNDED" : "PROCESSING";
+        if (booking.refundStatus === "REFUNDED")
+          booking.refundedAt = new Date();
+      } else {
+        booking.refundStatus = "FAILED";
+        booking.refundError = result.error || "Refund failed";
+      }
+    } else {
+      // Legacy booking without payment id — admin must refund manually
+      booking.refundStatus = "MANUAL";
+      booking.refundError = "No Razorpay payment id — manual refund required";
+    }
+  } else {
+    booking.refundStatus = "REFUNDED"; // nothing to refund (0% slab)
+    booking.refundedAt = new Date();
+  }
+
+  await booking.save();
+
+  // ── Release seats + bookingCount ──────────────────────────────────────────
+  await Batch.findByIdAndUpdate(booking.batchId, {
+    $inc: { bookedSeats: -booking.seats },
+  });
+  await Package.findByIdAndUpdate(booking.packageId, {
+    $inc: { bookingCount: -booking.seats },
+  });
+
+  // ── Credit operator the cancellation retention (immediately) ─────────────
+  if (operatorRetained > 0) {
+    await creditOperatorWallet(
+      booking.operatorId,
+      operatorRetained,
+      booking._id,
+      `Cancellation retention — Booking ${booking.bookingId}`,
+    );
+  }
+
+  // ── Flag admin if addon was already dispatched to Snapja ──────────────────
+  if (booking.addonDispatched && addonRefund > 0) {
+    try {
+      const { notifyAdmin } = require("./notificationController");
+      notifyAdmin(
+        "Manual Snapja Reconciliation Needed",
+        `Booking ${booking.bookingId} cancelled after addon was dispatched to Snapja. ₹${addonRefund} refunded to user — reconcile with Snapja manually.`,
+        { type: "general", bookingId: booking._id.toString() },
+      );
+    } catch {}
+  }
+
+  return {
+    refundAmount: userRefund,
+    refundPercent,
+    breakdown,
+    refundStatus: booking.refundStatus,
+  };
+}
+
 // ── User ──────────────────────────────────────────────────────────────────────
 
 // POST /api/trip-bookings  — user creates a booking
 exports.createBooking = async (req, res) => {
   try {
+    // ── SECURITY GATE ─────────────────────────────────────────────────────────
+    // A booking may ONLY be minted by the payment-verification flow, which sets
+    // req._paymentVerified after validating the Razorpay signature, amount, and
+    // order ownership. A direct POST to /api/trip-bookings must never create a
+    // free (unpaid) confirmed booking.
+    if (!req._paymentVerified) {
+      return res.status(402).json({
+        success: false,
+        message:
+          "Payment required — bookings can only be created after payment verification.",
+      });
+    }
+
     const { packageId, batchId, seats = 1 } = req.body;
 
     if (!packageId || !batchId) {
@@ -140,18 +417,31 @@ exports.createBooking = async (req, res) => {
     const platformFeePercent = (await getSetting("platform_fee_percent")) ?? 10;
     const gstPercent = (await getSetting("gst_percent")) ?? 5;
 
-    // ── Calculate pricing (snapshotted forever) ────────────────────────────
-    const pricing = calcPricing({
-      adultPrice: batch.adultPrice,
-      seats: numSeats,
-      platformFeePercent,
-      gstPercent,
-    });
+    // ── Compute addon (Snapja) amounts — held by platform until dispatch ──────
+    const ADDON_BASE_PRICE = 2000;
+    let addonSurcharge = 0; // operator's outside-city portion
+    let addonTotalPrice = 0; // base + surcharge (full held amount)
+    const addonDaysData = req.body.addonDays || null;
+    const addonNames = addonDaysData ? Object.keys(addonDaysData) : [];
+    if (addonDaysData) {
+      for (const addonName of addonNames) {
+        const days = addonDaysData[addonName] || [];
+        for (const dayIdx of days) {
+          const dayInfo = pkg.itinerary[dayIdx];
+          const surcharge = dayInfo?.isOutsideCity
+            ? pkg.outsideCityCharge || 0
+            : 0;
+          addonSurcharge += surcharge;
+          addonTotalPrice += ADDON_BASE_PRICE + surcharge;
+        }
+      }
+    }
 
-    // ── Apply coupon if provided ───────────────────────────────────────────
+    // ── Apply coupon (discount applies to fare only) ──────────────────────────
     const couponCode = (req.body.couponCode || "").trim().toUpperCase();
     let discountAmount = 0;
     let appliedCouponId = null;
+    const fareSubtotalRaw = Math.round(batch.adultPrice * numSeats);
 
     if (couponCode) {
       const Coupon = require("../models/Coupon");
@@ -165,43 +455,41 @@ exports.createBooking = async (req, res) => {
       });
 
       if (coupon) {
-        // Check usage limit
         const withinUsage =
           coupon.usageLimit === 0 || coupon.usedCount < coupon.usageLimit;
-        // Check min guests
         const meetsGuests =
           coupon.minGuests === 0 || numSeats >= coupon.minGuests;
-        // Check min order
         const meetsOrder =
           coupon.minOrderAmount === 0 ||
-          pricing.subtotal >= coupon.minOrderAmount;
+          fareSubtotalRaw >= coupon.minOrderAmount;
 
         if (withinUsage && meetsGuests && meetsOrder) {
           if (coupon.type === "percentage") {
-            discountAmount = Math.round(
-              (pricing.subtotal * coupon.value) / 100,
-            );
+            discountAmount = Math.round((fareSubtotalRaw * coupon.value) / 100);
             if (coupon.maxDiscount > 0 && discountAmount > coupon.maxDiscount) {
               discountAmount = coupon.maxDiscount;
             }
           } else {
-            discountAmount = Math.min(coupon.value, pricing.subtotal);
+            discountAmount = Math.min(coupon.value, fareSubtotalRaw);
           }
           appliedCouponId = coupon._id;
-          // Increment usage
           coupon.usedCount += 1;
           await coupon.save();
         }
       }
     }
 
-    // Update pricing with discount
-    if (discountAmount > 0) {
-      pricing.discountAmount = discountAmount;
-      pricing.couponCode = couponCode;
-      pricing.totalAmount = pricing.totalAmount - discountAmount;
-      pricing.operatorAmount = pricing.totalAmount - pricing.platformFeeAmount;
-    }
+    // ── Calculate pricing (snapshotted forever) ────────────────────────────
+    const pricing = calcPricing({
+      adultPrice: batch.adultPrice,
+      seats: numSeats,
+      platformFeePercent,
+      gstPercent,
+      addonAmount: addonTotalPrice,
+      addonSurcharge,
+      discountAmount,
+    });
+    if (discountAmount > 0) pricing.couponCode = couponCode;
 
     // ── Build snapshot ─────────────────────────────────────────────────────
     const snapshot = {
@@ -213,38 +501,6 @@ exports.createBooking = async (req, res) => {
       endDate: batch.endDate,
       adultPrice: batch.adultPrice,
     };
-
-    // ── Compute addon surcharge for outside-city days ─────────────────────────
-    let addonSurcharge = 0;
-    const addonDaysData = req.body.addonDays || null;
-    const addonNames = addonDaysData ? Object.keys(addonDaysData) : [];
-    if (addonDaysData && pkg.outsideCityCharge > 0) {
-      for (const addonName of addonNames) {
-        const days = addonDaysData[addonName] || [];
-        for (const dayIdx of days) {
-          const dayInfo = pkg.itinerary[dayIdx];
-          if (dayInfo && dayInfo.isOutsideCity) {
-            addonSurcharge += pkg.outsideCityCharge;
-          }
-        }
-      }
-    }
-
-    // Compute total addon price (base + surcharge) for display
-    const ADDON_BASE_PRICE = 2000;
-    let addonTotalPrice = 0;
-    if (addonDaysData) {
-      for (const addonName of addonNames) {
-        const days = addonDaysData[addonName] || [];
-        for (const dayIdx of days) {
-          const dayInfo = pkg.itinerary[dayIdx];
-          const surcharge = dayInfo?.isOutsideCity
-            ? pkg.outsideCityCharge || 0
-            : 0;
-          addonTotalPrice += ADDON_BASE_PRICE + surcharge;
-        }
-      }
-    }
 
     // ── Create booking — auto-confirmed (payment simulated) ──────────────────
     const booking = await TripBooking.create({
@@ -267,6 +523,10 @@ exports.createBooking = async (req, res) => {
       addonSurcharge,
       addonNames,
       addonTotalPrice,
+      addonHeld: addonTotalPrice > 0, // hold Snapja money until dispatch
+      addonDispatched: false,
+      razorpayPaymentId: req.body.paymentId || "",
+      razorpayOrderId: req.body.razorpayOrderId || "",
     });
 
     // ── Side effects — increment seats + bookingCount immediately ──────────
@@ -443,6 +703,8 @@ exports.adminGetAllBookings = async (req, res) => {
       operatorId,
       batchId,
       search,
+      fromDate,
+      toDate,
       page = 1,
       limit = 20,
     } = req.query;
@@ -453,6 +715,15 @@ exports.adminGetAllBookings = async (req, res) => {
     if (operatorId) query.operatorId = operatorId;
     if (batchId) query.batchId = batchId;
     if (search) query.bookingId = { $regex: search, $options: "i" };
+    if (fromDate || toDate) {
+      query.createdAt = {};
+      if (fromDate) query.createdAt.$gte = new Date(fromDate);
+      if (toDate) {
+        const end = new Date(toDate);
+        end.setHours(23, 59, 59, 999);
+        query.createdAt.$lte = end;
+      }
+    }
 
     const skip = (Number(page) - 1) * Number(limit);
     const [bookings, total] = await Promise.all([
@@ -508,12 +779,50 @@ exports.updateBookingStatus = async (req, res) => {
       });
     }
 
-    booking.status = status;
+    // ── Admin cancellation → 100% refund to user via shared helper ──────────
     if (status === "CANCELLED") {
-      booking.cancelReason = (cancelReason || "Cancelled by admin").trim();
-      booking.cancelledBy = "admin";
+      if (prevStatus !== "CONFIRMED" && prevStatus !== "PENDING") {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot cancel a ${prevStatus.toLowerCase()} booking`,
+        });
+      }
+      const summary = await processCancellationRefund(booking, {
+        cancelledBy: "admin",
+        reason: (cancelReason || "Cancelled by admin").trim(),
+        fullRefund: true,
+      });
+
+      const snap = booking.snapshot || {};
+      notifyUser(
+        booking.userId,
+        "Booking Cancelled by TripReel",
+        `Your booking for ${snap.packageTitle || "trip"} was cancelled. A full refund of ₹${summary.refundAmount.toLocaleString("en-IN")} is being processed.`,
+        { type: "booking_cancelled", bookingId: booking._id.toString() },
+      );
+      const { notifyOperator } = require("./notificationController");
+      notifyOperator(
+        booking.operatorId,
+        "Booking Cancelled by Admin",
+        `Booking ${booking.bookingId} for ${snap.packageTitle || "your package"} was cancelled by admin.`,
+        { type: "booking_cancelled", bookingId: booking._id.toString() },
+      );
+      try {
+        const Conversation = require("../models/Conversation");
+        await Conversation.updateMany(
+          { bookingId: booking._id },
+          { isActive: false },
+        );
+      } catch {}
+
+      const updated = await TripBooking.findById(booking._id)
+        .populate("userId", "name email phone")
+        .populate("packageId", "title location")
+        .populate("batchId", "startDate endDate label");
+      return res.json({ success: true, booking: updated, refund: summary });
     }
 
+    booking.status = status;
     await booking.save();
 
     // ── Side effects ──────────────────────────────────────────────────────
@@ -527,22 +836,6 @@ exports.updateBookingStatus = async (req, res) => {
         $inc: { bookingCount: booking.seats },
       });
       // No wallet credit here — funds released 2 days after trip endDate via cron
-    }
-
-    // CANCELLED (was CONFIRMED) → reverse seats + bookingCount + debit wallet
-    if (status === "CANCELLED" && prevStatus === "CONFIRMED") {
-      await Batch.findByIdAndUpdate(booking.batchId, {
-        $inc: { bookedSeats: -booking.seats },
-      });
-      await Package.findByIdAndUpdate(booking.packageId, {
-        $inc: { bookingCount: -booking.seats },
-      });
-      await debitOperatorWallet(
-        booking.operatorId,
-        booking.pricing.operatorAmount,
-        booking._id,
-        `Booking ${booking.bookingId} cancelled — reversal`,
-      );
     }
 
     // Reload with populated fields
@@ -562,11 +855,30 @@ exports.updateBookingStatus = async (req, res) => {
 // GET /api/trip-bookings/operator/mine  — operator sees bookings for their packages
 exports.operatorGetMyBookings = async (req, res) => {
   try {
-    const { status, packageId, batchId, page = 1, limit = 20 } = req.query;
+    const {
+      status,
+      packageId,
+      batchId,
+      search,
+      fromDate,
+      toDate,
+      page = 1,
+      limit = 20,
+    } = req.query;
     const query = { operatorId: req.operator._id };
     if (status && status !== "all") query.status = status;
     if (packageId) query.packageId = packageId;
     if (batchId) query.batchId = batchId;
+    if (search) query.bookingId = { $regex: search, $options: "i" };
+    if (fromDate || toDate) {
+      query.createdAt = {};
+      if (fromDate) query.createdAt.$gte = new Date(fromDate);
+      if (toDate) {
+        const end = new Date(toDate);
+        end.setHours(23, 59, 59, 999);
+        query.createdAt.$lte = end;
+      }
+    }
 
     const skip = (Number(page) - 1) * Number(limit);
     const [bookings, total] = await Promise.all([
@@ -614,88 +926,54 @@ exports.cancelBooking = async (req, res) => {
       });
     }
 
-    // Calculate refund based on days before trip start
-    const startDate = booking.snapshot?.startDate;
-    let refundPercent = 0;
-    let refundAmount = 0;
-
-    if (startDate) {
-      const now = new Date();
-      const tripStart = new Date(startDate);
-      const daysBeforeTrip = Math.ceil(
-        (tripStart - now) / (1000 * 60 * 60 * 24),
-      );
-
-      // Get refund slabs from platform settings
-      let slabs = [
-        { daysBeforeTrip: 7, refundPercent: 90 },
-        { daysBeforeTrip: 3, refundPercent: 50 },
-        { daysBeforeTrip: 0, refundPercent: 0 },
-      ];
-
-      try {
-        const slabsSetting = await getSetting("cancellation_refund_slabs");
-        if (Array.isArray(slabsSetting) && slabsSetting.length > 0) {
-          slabs = slabsSetting;
-        }
-      } catch {}
-
-      // Sort slabs descending by daysBeforeTrip
-      slabs.sort((a, b) => b.daysBeforeTrip - a.daysBeforeTrip);
-
-      // Find which slab applies
-      for (const slab of slabs) {
-        if (daysBeforeTrip >= slab.daysBeforeTrip) {
-          refundPercent = slab.refundPercent;
-          break;
-        }
-      }
-
-      refundAmount = Math.round(
-        (booking.pricing.totalAmount * refundPercent) / 100,
-      );
+    // Guard: can't cancel after the trip has started
+    if (
+      booking.snapshot?.startDate &&
+      new Date(booking.snapshot.startDate) <= new Date()
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "This trip has already started and cannot be cancelled.",
+      });
     }
 
-    // Update booking
-    booking.status = "CANCELLED";
-    booking.cancelReason = reason || "Cancelled by user";
-    booking.cancelledBy = "user";
-    booking.cancelledAt = new Date();
-    booking.refundPercent = refundPercent;
-    booking.refundAmount = refundAmount;
-    await booking.save();
-
-    // Release seats on the batch
-    await Batch.findByIdAndUpdate(booking.batchId, {
-      $inc: { bookedSeats: -booking.seats },
+    // ── Process refund (slab-based) via shared helper ────────────────────────
+    const summary = await processCancellationRefund(booking, {
+      cancelledBy: "user",
+      reason: reason || "Cancelled by user",
+      fullRefund: false,
     });
 
-    // Decrement bookingCount on the package
-    await Package.findByIdAndUpdate(booking.packageId, {
-      $inc: { bookingCount: -1 },
-    });
-
-    // Notify user about cancellation
     const snap = booking.snapshot || {};
+
+    // Notify user
     notifyUser(
       booking.userId,
       "Booking Cancelled",
-      refundAmount > 0
-        ? `Your booking for ${snap.packageTitle || "trip"} has been cancelled. ₹${refundAmount.toLocaleString("en-IN")} refund will be processed.`
-        : `Your booking for ${snap.packageTitle || "trip"} has been cancelled.`,
+      summary.refundAmount > 0
+        ? `Your booking for ${snap.packageTitle || "trip"} is cancelled. ₹${summary.refundAmount.toLocaleString("en-IN")} refund is being processed to your original payment method.`
+        : `Your booking for ${snap.packageTitle || "trip"} has been cancelled. As per the cancellation policy, no refund is applicable.`,
       { type: "booking_cancelled", bookingId: booking._id.toString() },
     );
 
-    // Notify operator about cancellation
+    // Notify operator
     const { notifyOperator } = require("./notificationController");
     notifyOperator(
       booking.operatorId,
       "Booking Cancelled",
-      `A booking for ${snap.packageTitle || "your package"} (${booking.seats} seat${booking.seats > 1 ? "s" : ""}) was cancelled by user.`,
+      `A booking for ${snap.packageTitle || "your package"} (${booking.seats} seat${booking.seats > 1 ? "s" : ""}) was cancelled by the user.`,
       { type: "booking_cancelled", bookingId: booking._id.toString() },
     );
 
-    // Send cancellation email to user
+    // Notify admin (visibility — no approval needed)
+    const { notifyAdmin } = require("./notificationController");
+    notifyAdmin(
+      "User Cancelled a Booking",
+      `${snap.packageTitle || "Trip"} — Booking ${booking.bookingId} cancelled by user. Refund: ₹${summary.refundAmount.toLocaleString("en-IN")} (${summary.refundPercent}%).`,
+      { type: "booking_cancelled", bookingId: booking._id.toString() },
+    );
+
+    // Cancellation email to user
     try {
       const { sendMail } = require("../utils/sendMail");
       const User = require("../models/User");
@@ -704,13 +982,13 @@ exports.cancelBooking = async (req, res) => {
         sendMail({
           to: user.email,
           subject: `Booking Cancelled - ${snap.packageTitle || "Trip"}`,
-          text: `Hi ${user.name}, your booking ${booking.bookingId} has been cancelled.${refundAmount > 0 ? ` Refund of Rs.${refundAmount} (${refundPercent}%) will be processed.` : ""}`,
-          html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;"><h2 style="color:#EF4444;">Booking Cancelled</h2><p>Hi <strong>${user.name}</strong>,</p><p>Your booking <strong>${booking.bookingId}</strong> for <strong>${snap.packageTitle || "trip"}</strong> has been cancelled.</p>${refundAmount > 0 ? `<p style="background:#F0FDF4;padding:12px;border-radius:8px;color:#065F46;"><strong>Refund:</strong> Rs.${refundAmount.toLocaleString("en-IN")} (${refundPercent}%) will be processed within 5-7 business days.</p>` : ""}<p style="color:#6B7280;font-size:13px;">If you have questions, contact us via the app.</p><p>Team TripReel</p></div>`,
+          text: `Hi ${user.name}, your booking ${booking.bookingId} has been cancelled.${summary.refundAmount > 0 ? ` Refund of Rs.${summary.refundAmount} (${summary.refundPercent}%) is being processed.` : ""}`,
+          html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;"><h2 style="color:#EF4444;">Booking Cancelled</h2><p>Hi <strong>${user.name}</strong>,</p><p>Your booking <strong>${booking.bookingId}</strong> for <strong>${snap.packageTitle || "trip"}</strong> has been cancelled.</p>${summary.refundAmount > 0 ? `<p style="background:#F0FDF4;padding:12px;border-radius:8px;color:#065F46;"><strong>Refund:</strong> Rs.${summary.refundAmount.toLocaleString("en-IN")} (${summary.refundPercent}%) is being processed to your original payment method within 5-7 business days.</p>` : ""}<p style="color:#6B7280;font-size:13px;">If you have questions, contact us via the app.</p><p>Team TripReel</p></div>`,
         });
       }
     } catch {}
 
-    // Close chat window for this booking
+    // Close chat window
     try {
       const Conversation = require("../models/Conversation");
       await Conversation.updateMany(
@@ -722,8 +1000,10 @@ exports.cancelBooking = async (req, res) => {
     res.json({
       success: true,
       message: "Booking cancelled successfully",
-      refundPercent,
-      refundAmount,
+      refundPercent: summary.refundPercent,
+      refundAmount: summary.refundAmount,
+      refundStatus: summary.refundStatus,
+      breakdown: summary.breakdown,
       booking,
     });
   } catch (err) {
@@ -748,39 +1028,26 @@ exports.getRefundPreview = async (req, res) => {
     }
 
     const startDate = booking.snapshot?.startDate;
-    let refundPercent = 0;
     let daysBeforeTrip = 0;
-
     if (startDate) {
       const now = new Date();
       const tripStart = new Date(startDate);
       daysBeforeTrip = Math.ceil((tripStart - now) / (1000 * 60 * 60 * 24));
-
-      let slabs = [
-        { daysBeforeTrip: 7, refundPercent: 90 },
-        { daysBeforeTrip: 3, refundPercent: 50 },
-        { daysBeforeTrip: 0, refundPercent: 0 },
-      ];
-
-      try {
-        const slabsSetting = await getSetting("cancellation_refund_slabs");
-        if (Array.isArray(slabsSetting) && slabsSetting.length > 0) {
-          slabs = slabsSetting;
-        }
-      } catch {}
-
-      slabs.sort((a, b) => b.daysBeforeTrip - a.daysBeforeTrip);
-      for (const slab of slabs) {
-        if (daysBeforeTrip >= slab.daysBeforeTrip) {
-          refundPercent = slab.refundPercent;
-          break;
-        }
-      }
     }
+    const refundPercent = await resolveRefundPercent(startDate);
 
-    const refundAmount = Math.round(
-      (booking.pricing.totalAmount * refundPercent) / 100,
-    );
+    // Mirror the breakdown logic used in processCancellationRefund
+    const p = booking.pricing || {};
+    const fareSubtotal = Number(p.fareSubtotal) || 0;
+    const discountAmount = Number(p.discountAmount) || 0;
+    const netFare = Math.max(0, fareSubtotal - discountAmount);
+    const gst = Number(p.gstAmount) || 0;
+    const addon = Number(p.addonAmount) || 0;
+
+    const fareRefund = Math.round((netFare * refundPercent) / 100);
+    const gstRefund = Math.round((gst * refundPercent) / 100);
+    const addonRefund = !booking.addonDispatched ? addon : 0;
+    const refundAmount = fareRefund + gstRefund + addonRefund;
 
     res.json({
       success: true,
@@ -788,7 +1055,272 @@ exports.getRefundPreview = async (req, res) => {
       refundPercent,
       refundAmount,
       totalPaid: booking.pricing.totalAmount,
+      breakdown: { fareRefund, gstRefund, addonRefund },
     });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── Operator cancels a single booking ─────────────────────────────────────────
+// POST /api/operator/bookings/:id/cancel  (operatorProtect)
+exports.operatorCancelBooking = async (req, res) => {
+  try {
+    const { reason } = req.body;
+    const booking = await TripBooking.findById(req.params.id);
+    if (!booking) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Booking not found" });
+    }
+    // Operator can only cancel bookings for their own packages
+    if (String(booking.operatorId) !== String(req.operator._id)) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Not authorized" });
+    }
+    if (!["CONFIRMED", "PENDING"].includes(booking.status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot cancel a ${booking.status.toLowerCase()} booking`,
+      });
+    }
+
+    const summary = await processCancellationRefund(booking, {
+      cancelledBy: "operator",
+      reason: reason || "Cancelled by operator",
+      fullRefund: true, // operator cancel → 100% refund to user
+    });
+
+    const snap = booking.snapshot || {};
+    // Notify user (full refund)
+    notifyUser(
+      booking.userId,
+      "Trip Cancelled by Operator",
+      `Your booking for ${snap.packageTitle || "trip"} was cancelled by the operator. A full refund of ₹${summary.refundAmount.toLocaleString("en-IN")} is being processed.`,
+      { type: "booking_cancelled", bookingId: booking._id.toString() },
+    );
+    // Notify admin (visibility + who cancelled)
+    const { notifyAdmin } = require("./notificationController");
+    notifyAdmin(
+      "Operator Cancelled a Booking",
+      `Operator cancelled booking ${booking.bookingId} (${snap.packageTitle || "trip"}). Full refund ₹${summary.refundAmount.toLocaleString("en-IN")} to user. Reason: ${reason || "—"}`,
+      { type: "booking_cancelled", bookingId: booking._id.toString() },
+    );
+    try {
+      const Conversation = require("../models/Conversation");
+      await Conversation.updateMany(
+        { bookingId: booking._id },
+        { isActive: false },
+      );
+    } catch {}
+
+    res.json({ success: true, refund: summary });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── Operator cancels an entire batch ──────────────────────────────────────────
+// POST /api/operator/batches/:batchId/cancel  (operatorProtect)
+exports.operatorCancelBatch = async (req, res) => {
+  try {
+    const { reason } = req.body;
+    const { batchId } = req.params;
+
+    const batch = await Batch.findById(batchId);
+    if (!batch) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Batch not found" });
+    }
+    if (String(batch.operatorId) !== String(req.operator._id)) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Not authorized" });
+    }
+
+    const bookings = await TripBooking.find({
+      batchId,
+      status: { $in: ["CONFIRMED", "PENDING"] },
+    });
+
+    const { notifyAdmin } = require("./notificationController");
+    let cancelled = 0;
+    let totalRefund = 0;
+    const errors = [];
+
+    for (const booking of bookings) {
+      try {
+        const summary = await processCancellationRefund(booking, {
+          cancelledBy: "operator",
+          reason: reason || "Batch cancelled by operator",
+          fullRefund: true,
+        });
+        totalRefund += summary.refundAmount;
+        cancelled++;
+        const snap = booking.snapshot || {};
+        notifyUser(
+          booking.userId,
+          "Trip Cancelled by Operator",
+          `Your booking for ${snap.packageTitle || "trip"} was cancelled by the operator. A full refund of ₹${summary.refundAmount.toLocaleString("en-IN")} is being processed.`,
+          { type: "booking_cancelled", bookingId: booking._id.toString() },
+        );
+        try {
+          const Conversation = require("../models/Conversation");
+          await Conversation.updateMany(
+            { bookingId: booking._id },
+            { isActive: false },
+          );
+        } catch {}
+      } catch (e) {
+        errors.push(`${booking.bookingId}: ${e.message}`);
+      }
+    }
+
+    // Deactivate the batch so no new bookings
+    batch.isActive = false;
+    await batch.save();
+
+    notifyAdmin(
+      "Operator Cancelled an Entire Batch",
+      `Operator cancelled batch "${batch.label || batchId}" — ${cancelled} booking(s) refunded (₹${totalRefund.toLocaleString("en-IN")} total). Reason: ${reason || "—"}`,
+      { type: "booking_cancelled", batchId: String(batchId) },
+    );
+
+    res.json({
+      success: true,
+      cancelledCount: cancelled,
+      totalRefund,
+      errors,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── Admin: list cancellations / refunds (view-only log) ───────────────────────
+// GET /api/trip-bookings/admin/refunds
+exports.adminGetRefunds = async (req, res) => {
+  try {
+    const {
+      refundStatus,
+      search,
+      cancelledBy,
+      fromDate,
+      toDate,
+      page = 1,
+      limit = 20,
+    } = req.query;
+    const query = { status: "CANCELLED" };
+    if (refundStatus && refundStatus !== "all")
+      query.refundStatus = refundStatus;
+    if (cancelledBy && cancelledBy !== "all") query.cancelledBy = cancelledBy;
+    if (search) query.bookingId = { $regex: search, $options: "i" };
+    if (fromDate || toDate) {
+      query.cancelledAt = {};
+      if (fromDate) query.cancelledAt.$gte = new Date(fromDate);
+      if (toDate) {
+        const end = new Date(toDate);
+        end.setHours(23, 59, 59, 999);
+        query.cancelledAt.$lte = end;
+      }
+    }
+
+    const skip = (Number(page) - 1) * Number(limit);
+    const [bookings, total] = await Promise.all([
+      TripBooking.find(query)
+        .populate("userId", "name email phone")
+        .populate("packageId", "title location")
+        .populate("batchId", "startDate endDate label")
+        .populate("operatorId", "businessName contactName")
+        .sort({ cancelledAt: -1 })
+        .skip(skip)
+        .limit(Number(limit)),
+      TripBooking.countDocuments(query),
+    ]);
+
+    res.json({ success: true, total, page: Number(page), bookings });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── Admin: retry a FAILED refund ──────────────────────────────────────────────
+// POST /api/trip-bookings/admin/refunds/:id/retry
+exports.adminRetryRefund = async (req, res) => {
+  try {
+    const booking = await TripBooking.findById(req.params.id);
+    if (!booking) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Booking not found" });
+    }
+    if (!["FAILED", "MANUAL"].includes(booking.refundStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: `Refund is '${booking.refundStatus}', nothing to retry`,
+      });
+    }
+    if (!booking.razorpayPaymentId) {
+      return res.status(400).json({
+        success: false,
+        message: "No Razorpay payment id — refund the user manually offline.",
+      });
+    }
+
+    // Allow admin to optionally override the amount
+    const amount = Number(req.body.amount) || booking.refundAmount;
+    const { refundPayment } = require("../utils/razorpayRefund");
+    const result = await refundPayment(booking.razorpayPaymentId, amount, {
+      bookingId: booking.bookingId,
+      reason: "Admin retry",
+    });
+
+    if (result.success) {
+      booking.refundId = result.refundId || "";
+      booking.refundAmount = amount;
+      booking.refundStatus =
+        result.status === "processed" ? "REFUNDED" : "PROCESSING";
+      booking.refundError = "";
+      if (booking.refundStatus === "REFUNDED") booking.refundedAt = new Date();
+      await booking.save();
+      notifyUser(
+        booking.userId,
+        "Refund Processing",
+        `Your refund of ₹${amount.toLocaleString("en-IN")} for ${booking.snapshot?.packageTitle || "your trip"} is being processed.`,
+        { type: "booking_cancelled", bookingId: booking._id.toString() },
+      );
+      return res.json({ success: true, refundStatus: booking.refundStatus });
+    }
+    booking.refundStatus = "FAILED";
+    booking.refundError = result.error || "Refund failed";
+    await booking.save();
+    res
+      .status(400)
+      .json({ success: false, message: result.error || "Refund failed" });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── Admin: mark a MANUAL refund as done (offline) ─────────────────────────────
+// POST /api/trip-bookings/admin/refunds/:id/mark-done
+exports.adminMarkRefundDone = async (req, res) => {
+  try {
+    const booking = await TripBooking.findById(req.params.id);
+    if (!booking) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Booking not found" });
+    }
+    booking.refundStatus = "REFUNDED";
+    booking.refundedAt = new Date();
+    booking.refundError = "";
+    if (req.body.note)
+      booking.cancelReason = `${booking.cancelReason} | ${req.body.note}`;
+    await booking.save();
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

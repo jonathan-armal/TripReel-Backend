@@ -38,6 +38,21 @@ exports.getRevenueDashboard = async (req, res) => {
       0,
     );
 
+    // GST collected (platform collects, remits to govt)
+    const totalGstCollected = allBookings.reduce(
+      (s, b) => s + (b.pricing?.gstAmount || 0),
+      0,
+    );
+    // Snapja add-on payouts (base portion = addonAmount - addonSurcharge)
+    const totalSnapjaPayouts = allBookings.reduce(
+      (s, b) =>
+        s +
+        Math.max(0, (b.pricing?.addonAmount || 0) - (b.addonSurcharge || 0)),
+      0,
+    );
+    // Net platform profit = platform fee only (GST is remitted, Snapja is paid out)
+    const netPlatformProfit = totalPlatformEarnings;
+
     // This month
     const thisMonthBookings = allBookings.filter(
       (b) => new Date(b.createdAt) >= monthStart,
@@ -129,6 +144,9 @@ exports.getRevenueDashboard = async (req, res) => {
         totalPlatformEarnings,
         totalOperatorPayouts,
         totalRefunds,
+        totalGstCollected,
+        totalSnapjaPayouts,
+        netPlatformProfit,
         thisMonthRevenue,
         thisMonthPlatformFee,
         lastMonthRevenue,

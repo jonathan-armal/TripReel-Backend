@@ -125,9 +125,15 @@ exports.createReview = async (req, res) => {
         .json({ success: false, message: "Package not found" });
     }
 
-    // Upsert: one review per user per package
+    // Upsert: one review per booking (so multiple bookings of the same package
+    // each get their own review). Falls back to per-user-per-package for legacy
+    // reviews that have no bookingId.
+    const reviewQuery = bookingId
+      ? { bookingRef: bookingId }
+      : { packageId, userId: req.user.id, bookingRef: null };
+
     const review = await Review.findOneAndUpdate(
-      { packageId, userId: req.user.id },
+      reviewQuery,
       {
         packageId,
         userId: req.user.id,
@@ -137,7 +143,12 @@ exports.createReview = async (req, res) => {
         rating: r,
         comment: (comment || "").trim(),
       },
-      { upsert: true, new: true, runValidators: true },
+      {
+        upsert: true,
+        new: true,
+        runValidators: true,
+        setDefaultsOnInsert: true,
+      },
     );
 
     // Recalculate package rating

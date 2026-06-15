@@ -9,6 +9,9 @@ const {
   operatorGetMyBookings,
   cancelBooking,
   getRefundPreview,
+  adminGetRefunds,
+  adminRetryRefund,
+  adminMarkRefundDone,
 } = require("../controllers/tripBookingController");
 const { protect, restrictTo } = require("../middleware/authMiddleware");
 const { operatorProtect } = require("../middleware/operatorAuthMiddleware");
@@ -18,6 +21,16 @@ router.use(protect);
 
 router.post("/", createBooking);
 router.get("/my", getMyBookings);
+
+// ── Admin refunds (must be before /:id to avoid route clash) ──────────────────
+router.get("/admin/refunds", restrictTo("admin"), adminGetRefunds);
+router.post("/admin/refunds/:id/retry", restrictTo("admin"), adminRetryRefund);
+router.post(
+  "/admin/refunds/:id/mark-done",
+  restrictTo("admin"),
+  adminMarkRefundDone,
+);
+
 router.get("/:id", getBookingById);
 router.get("/:id/refund-preview", getRefundPreview);
 router.post("/:id/cancel", cancelBooking);

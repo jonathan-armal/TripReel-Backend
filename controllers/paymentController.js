@@ -23,28 +23,56 @@ function getRazorpay() {
  */
 exports.createOrder = async (req, res) => {
   try {
-    const { amount, packageId, batchId, seats, couponCode, travelers } =
-      req.body;
+    const { packageId, batchId, seats, couponCode, addonDays } = req.body;
 
-    if (!amount || !packageId || !batchId) {
+    if (!packageId || !batchId) {
       return res.status(400).json({
         success: false,
-        message: "amount, packageId, and batchId are required",
+        message: "packageId and batchId are required",
       });
     }
 
-    const amountInPaise = Math.round(amount * 100); // Razorpay expects paise
+    // ── Recompute the authoritative amount SERVER-SIDE (never trust client) ──
+    const tripBookingController = require("./tripBookingController");
+    let authoritativeAmount;
+    try {
+      authoritativeAmount =
+        await tripBookingController.computeAuthoritativePricing({
+          packageId,
+          batchId,
+          seats,
+          couponCode,
+          addonDays,
+        });
+    } catch (e) {
+      return res.status(400).json({ success: false, message: e.message });
+    }
+
+    if (!authoritativeAmount || authoritativeAmount <= 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid booking amount" });
+    }
+
+    const amountInPaise = Math.round(authoritativeAmount * 100);
+
+    // Store the booking context in notes so verify uses the SAME data that was priced
+    let addonDaysStr = "";
+    try {
+      addonDaysStr = addonDays ? JSON.stringify(addonDays) : "";
+    } catch {}
 
     const options = {
       amount: amountInPaise,
       currency: "INR",
       receipt: `tripreel_${Date.now()}`,
       notes: {
-        packageId,
-        batchId,
+        packageId: String(packageId),
+        batchId: String(batchId),
         seats: String(seats || 1),
         userId: req.user._id.toString(),
         couponCode: couponCode || "",
+        addonDays: addonDaysStr.slice(0, 480), // notes value cap
       },
     };
 
@@ -52,8 +80,9 @@ exports.createOrder = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      orderId: order.id, // internal reference
+      orderId: order.id,
       razorpayOrderId: order.id,
+      amount: authoritativeAmount, // authoritative — client should charge this
       amountInPaise: order.amount,
       currency: order.currency,
     });
@@ -101,15 +130,64 @@ exports.verifyPayment = async (req, res) => {
       });
     }
 
-    // Fetch the order to get notes (packageId, batchId, seats, couponCode)
+    const TripBooking = require("../models/TripBooking");
+
+    // ── Idempotency: if this payment already created a booking, return it ─────
+    const existing = await TripBooking.findOne({
+      razorpayPaymentId: razorpay_payment_id,
+    });
+    if (existing) {
+      return res.status(200).json({
+        success: true,
+        message: "Payment already processed",
+        bookingId: existing._id,
+        paymentId: razorpay_payment_id,
+      });
+    }
+
+    // Fetch the order to get the trusted, server-priced context from notes
     const order = await getRazorpay().orders.fetch(razorpay_order_id);
-    const { packageId, batchId, seats, couponCode } = order.notes || {};
+    const notes = order.notes || {};
+    const { packageId, batchId, seats, couponCode, userId } = notes;
+
+    // ── Ensure the order belongs to the authenticated user ───────────────────
+    if (userId && String(userId) !== String(req.user._id)) {
+      return res.status(403).json({
+        success: false,
+        message: "This payment order does not belong to you",
+      });
+    }
+
+    // Optional: confirm payment was actually captured for this order amount
+    try {
+      const payment = await getRazorpay().payments.fetch(razorpay_payment_id);
+      if (
+        payment.order_id !== razorpay_order_id ||
+        Number(payment.amount) !== Number(order.amount)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Payment amount mismatch — possible tampering",
+        });
+      }
+    } catch (e) {
+      // If fetch fails, signature already validated — proceed cautiously
+      console.warn("Payment fetch check skipped:", e.message);
+    }
+
+    // Use addonDays from the order notes (priced server-side), not the client body
+    let addonDays = null;
+    try {
+      addonDays = notes.addonDays ? JSON.parse(notes.addonDays) : null;
+    } catch {
+      addonDays = null;
+    }
 
     // Now create the actual booking using the existing tripBookingController logic
-    // We simulate a request to reuse the existing createBooking logic
     const tripBookingController = require("./tripBookingController");
     const fakeReq = {
       user: req.user,
+      _paymentVerified: true, // SECURITY: marks this as a payment-verified booking
       body: {
         packageId,
         batchId,
@@ -118,7 +196,7 @@ exports.verifyPayment = async (req, res) => {
         travelers: req.body.travelers || [],
         paymentId: razorpay_payment_id,
         razorpayOrderId: razorpay_order_id,
-        addonDays: req.body.addonDays || null,
+        addonDays,
       },
     };
 
