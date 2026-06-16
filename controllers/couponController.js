@@ -150,6 +150,20 @@ exports.createCoupon = async (req, res) => {
       });
     }
 
+    // Percentage coupons capped at 100%
+    if (type === "percentage" && (Number(value) <= 0 || Number(value) > 100)) {
+      return res.status(400).json({
+        success: false,
+        message: "Percentage discount must be between 1 and 100.",
+      });
+    }
+    if (type === "flat" && Number(value) <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Discount value must be greater than 0.",
+      });
+    }
+
     // Verify batch belongs to this operator
     const batch = await Batch.findOne({
       _id: batchId,

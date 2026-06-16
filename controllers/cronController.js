@@ -548,8 +548,9 @@ exports.runCron = async (req, res) => {
   }
 };
 
-// Export for use in a scheduled job later
-exports.runCronJobs = runCronJobs;
+// DEPRECATED: runCronJobs is superseded by the split job exports below.
+// Do NOT use this — it lacks the walletReleased guard and risks double-credit.
+// exports.runCronJobs = runCronJobs;
 
 // ── Split exports for separate scheduling ─────────────────────────────────────
 
@@ -780,9 +781,13 @@ exports.runReviewReminders = async function () {
   const results = { reviewReminders: 0, errors: [] };
   try {
     const { notifyUser } = require("./notificationController");
+    // Only check bookings that ended within the last 5 days (day 1/2/3 reminders)
+    // to avoid scanning the entire history as it grows.
+    const fiveDaysAgo = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
     const completedBookings = await TripBooking.find({
       status: "COMPLETED",
       hasReviewed: false,
+      updatedAt: { $gte: fiveDaysAgo },
     }).populate("batchId", "endDate");
 
     for (const booking of completedBookings) {

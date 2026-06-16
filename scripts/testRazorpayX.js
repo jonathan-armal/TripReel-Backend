@@ -9,8 +9,8 @@ require("dotenv").config();
 const BASE = "https://api.razorpay.com/v1";
 
 function authHeader() {
-  const id = process.env.RAZORPAY_KEY_ID;
-  const secret = process.env.RAZORPAY_KEY_SECRET;
+  const id = process.env.RAZORPAYX_KEY_ID;
+  const secret = process.env.RAZORPAYX_KEY_SECRET;
   return "Basic " + Buffer.from(`${id}:${secret}`).toString("base64");
 }
 

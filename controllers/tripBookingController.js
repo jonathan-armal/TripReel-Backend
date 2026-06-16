@@ -5,6 +5,7 @@ const OperatorWallet = require("../models/OperatorWallet");
 const WalletTransaction = require("../models/WalletTransaction");
 const { notifyUser } = require("./notificationController");
 const { getSetting } = require("./platformSettingsController");
+const escapeRegex = require("../utils/escapeRegex");
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -402,6 +403,24 @@ exports.createBooking = async (req, res) => {
       });
     }
 
+    // Atomic seat reservation: only succeeds if enough seats remain at DB level
+    // (prevents two concurrent bookings from overselling)
+    const seatReserved = await Batch.findOneAndUpdate(
+      {
+        _id: batchId,
+        $expr: { $lte: [{ $add: ["$bookedSeats", numSeats] }, "$totalSeats"] },
+      },
+      { $inc: { bookedSeats: numSeats } },
+      { new: true },
+    );
+    if (!seatReserved) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Not enough seats available — someone else may have booked just now.",
+      });
+    }
+
     // User CAN book same batch multiple times (e.g. adding more friends later)
 
     // ── Fetch package ──────────────────────────────────────────────────────
@@ -446,24 +465,32 @@ exports.createBooking = async (req, res) => {
     if (couponCode) {
       const Coupon = require("../models/Coupon");
       const now = new Date();
-      const coupon = await Coupon.findOne({
-        batchId,
-        code: couponCode,
-        isActive: true,
-        validFrom: { $lte: now },
-        validUntil: { $gte: now },
-      });
+
+      // Atomic: only increment usedCount if coupon is still valid + within limit
+      const coupon = await Coupon.findOneAndUpdate(
+        {
+          batchId,
+          code: couponCode,
+          isActive: true,
+          validFrom: { $lte: now },
+          validUntil: { $gte: now },
+          $or: [
+            { usageLimit: 0 }, // unlimited
+            { $expr: { $lt: ["$usedCount", "$usageLimit"] } },
+          ],
+        },
+        { $inc: { usedCount: 1 } },
+        { new: true },
+      );
 
       if (coupon) {
-        const withinUsage =
-          coupon.usageLimit === 0 || coupon.usedCount < coupon.usageLimit;
         const meetsGuests =
           coupon.minGuests === 0 || numSeats >= coupon.minGuests;
         const meetsOrder =
           coupon.minOrderAmount === 0 ||
           fareSubtotalRaw >= coupon.minOrderAmount;
 
-        if (withinUsage && meetsGuests && meetsOrder) {
+        if (meetsGuests && meetsOrder) {
           if (coupon.type === "percentage") {
             discountAmount = Math.round((fareSubtotalRaw * coupon.value) / 100);
             if (coupon.maxDiscount > 0 && discountAmount > coupon.maxDiscount) {
@@ -473,8 +500,12 @@ exports.createBooking = async (req, res) => {
             discountAmount = Math.min(coupon.value, fareSubtotalRaw);
           }
           appliedCouponId = coupon._id;
-          coupon.usedCount += 1;
-          await coupon.save();
+        } else {
+          // Conditions not met — roll back the increment
+          await Coupon.updateOne(
+            { _id: coupon._id },
+            { $inc: { usedCount: -1 } },
+          );
         }
       }
     }
@@ -530,7 +561,7 @@ exports.createBooking = async (req, res) => {
     });
 
     // ── Side effects — increment seats + bookingCount immediately ──────────
-    await Batch.findByIdAndUpdate(batchId, { $inc: { bookedSeats: numSeats } });
+    // ── Side effects — bookingCount (seats already reserved atomically above) ─
     await Package.findByIdAndUpdate(packageId, {
       $inc: { bookingCount: numSeats },
     });
@@ -714,7 +745,7 @@ exports.adminGetAllBookings = async (req, res) => {
     if (packageId) query.packageId = packageId;
     if (operatorId) query.operatorId = operatorId;
     if (batchId) query.batchId = batchId;
-    if (search) query.bookingId = { $regex: search, $options: "i" };
+    if (search) query.bookingId = { $regex: escapeRegex(search), $options: "i" };
     if (fromDate || toDate) {
       query.createdAt = {};
       if (fromDate) query.createdAt.$gte = new Date(fromDate);
@@ -869,7 +900,7 @@ exports.operatorGetMyBookings = async (req, res) => {
     if (status && status !== "all") query.status = status;
     if (packageId) query.packageId = packageId;
     if (batchId) query.batchId = batchId;
-    if (search) query.bookingId = { $regex: search, $options: "i" };
+    if (search) query.bookingId = { $regex: escapeRegex(search), $options: "i" };
     if (fromDate || toDate) {
       query.createdAt = {};
       if (fromDate) query.createdAt.$gte = new Date(fromDate);
@@ -1216,7 +1247,7 @@ exports.adminGetRefunds = async (req, res) => {
     if (refundStatus && refundStatus !== "all")
       query.refundStatus = refundStatus;
     if (cancelledBy && cancelledBy !== "all") query.cancelledBy = cancelledBy;
-    if (search) query.bookingId = { $regex: search, $options: "i" };
+    if (search) query.bookingId = { $regex: escapeRegex(search), $options: "i" };
     if (fromDate || toDate) {
       query.cancelledAt = {};
       if (fromDate) query.cancelledAt.$gte = new Date(fromDate);
@@ -1269,8 +1300,10 @@ exports.adminRetryRefund = async (req, res) => {
       });
     }
 
-    // Allow admin to optionally override the amount
-    const amount = Number(req.body.amount) || booking.refundAmount;
+    // Allow admin to optionally override the amount (capped to what user paid)
+    const maxRefundable = booking.pricing?.totalAmount || booking.refundAmount;
+    const rawAmount = Number(req.body.amount) || booking.refundAmount;
+    const amount = Math.min(rawAmount, maxRefundable);
     const { refundPayment } = require("../utils/razorpayRefund");
     const result = await refundPayment(booking.razorpayPaymentId, amount, {
       bookingId: booking.bookingId,

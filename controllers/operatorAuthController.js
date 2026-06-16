@@ -9,7 +9,7 @@ const signToken = (id) =>
 // POST /api/operators/auth/register
 exports.register = async (req, res) => {
   try {
-    const { contactName, email, phone, password } = req.body;
+    let { contactName, email, phone, password } = req.body;
 
     if (!password || password.length < 8) {
       return res.status(400).json({
@@ -18,11 +18,26 @@ exports.register = async (req, res) => {
       });
     }
 
-    const existing = await Operator.findOne({ email });
-    if (existing) {
+    // Normalize
+    email = (email || "").trim().toLowerCase();
+    phone = (phone || "").trim();
+
+    if (!email) {
       return res
         .status(400)
-        .json({ success: false, message: "Email already in use" });
+        .json({ success: false, message: "Email is required" });
+    }
+
+    // Reject if email OR phone already belongs to another operator
+    const orConditions = [{ email }];
+    if (phone) orConditions.push({ phone });
+    const existing = await Operator.findOne({ $or: orConditions });
+    if (existing) {
+      const reason = existing.email === email ? "email" : "phone number";
+      return res.status(400).json({
+        success: false,
+        message: `An operator account with this ${reason} already exists. Please log in instead.`,
+      });
     }
 
     const operator = await Operator.create({
@@ -45,6 +60,13 @@ exports.register = async (req, res) => {
       },
     });
   } catch (err) {
+    // Race-safe: duplicate key (unique email index) hit between check and create
+    if (err.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: "An operator account with this email or phone already exists.",
+      });
+    }
     res.status(500).json({ success: false, message: err.message });
   }
 };

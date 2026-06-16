@@ -128,10 +128,13 @@ exports.updateSetting = async (req, res) => {
           message: "value must be a non-negative number",
         });
       }
-      if (req.params.key === "platform_fee_percent" && numVal > 100) {
+      if (numVal > 100) {
         return res
           .status(400)
-          .json({ success: false, message: "Platform fee cannot exceed 100%" });
+          .json({
+            success: false,
+            message: "Percentage value cannot exceed 100%",
+          });
       }
       finalValue = numVal;
     } else if (arrayKeys.includes(req.params.key)) {

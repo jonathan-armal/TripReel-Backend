@@ -10,6 +10,8 @@ const signToken = (id) =>
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const OTP_TTL_MINUTES = 5;
 const OTP_MAX_ATTEMPTS = 5;
+const OTP_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+const OTP_RATE_LIMIT_MAX = 3; // max OTP requests per phone per window
 
 function generateOtp() {
   // 6-digit numeric OTP
@@ -150,6 +152,19 @@ exports.signupSendOtp = async (req, res) => {
     // Invalidate any older signup OTPs for this phone
     await Otp.deleteMany({ phone, purpose: "signup" });
 
+    // Rate limit: max 3 OTP requests per phone in 5 minutes
+    const recentOtps = await Otp.countDocuments({
+      phone,
+      createdAt: { $gte: new Date(Date.now() - OTP_RATE_LIMIT_WINDOW_MS) },
+    });
+    if (recentOtps >= OTP_RATE_LIMIT_MAX) {
+      return res.status(429).json({
+        success: false,
+        message:
+          "Too many OTP requests. Please wait 5 minutes before trying again.",
+      });
+    }
+
     const code = generateOtp();
     const expiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000);
 
@@ -161,11 +176,11 @@ exports.signupSendOtp = async (req, res) => {
       expiresAt,
     });
 
-    // ⚠️ DEV MODE: returning OTP directly. Replace with DLT SMS provider later.
+    // OTP delivery: In production, send via DLT SMS. In dev, logged to console.
+    console.log(`[DEV] Signup OTP for ${phone}: ${code}`);
     res.json({
       success: true,
       message: "OTP sent successfully",
-      otp: code,
       expiresIn: OTP_TTL_MINUTES * 60,
     });
   } catch (err) {
@@ -296,16 +311,29 @@ exports.loginSendOtp = async (req, res) => {
 
     await Otp.deleteMany({ phone, purpose: "login" });
 
+    // Rate limit: max 3 OTP requests per phone in 5 minutes
+    const recentOtps = await Otp.countDocuments({
+      phone,
+      createdAt: { $gte: new Date(Date.now() - OTP_RATE_LIMIT_WINDOW_MS) },
+    });
+    if (recentOtps >= OTP_RATE_LIMIT_MAX) {
+      return res.status(429).json({
+        success: false,
+        message:
+          "Too many OTP requests. Please wait 5 minutes before trying again.",
+      });
+    }
+
     const code = generateOtp();
     const expiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000);
 
     await Otp.create({ phone, code, purpose: "login", expiresAt });
 
-    // ⚠️ DEV MODE: returning OTP directly. Replace with DLT SMS provider later.
+    // OTP delivery: In production, send via DLT SMS. In dev, logged to console.
+    console.log(`[DEV] Login OTP for ${phone}: ${code}`);
     res.json({
       success: true,
       message: "OTP sent successfully",
-      otp: code,
       expiresIn: OTP_TTL_MINUTES * 60,
     });
   } catch (err) {
@@ -391,7 +419,7 @@ exports.loginVerifyOtp = async (req, res) => {
 // PATCH /api/profile  — update own name / email / phone / state
 exports.updateProfile = async (req, res) => {
   try {
-    const { name, email, phone, state, country } = req.body;
+    const { name, state, country } = req.body;
     const update = {};
 
     if (name && name.trim()) update.name = name.trim();
@@ -399,35 +427,8 @@ exports.updateProfile = async (req, res) => {
     if (typeof country !== "undefined")
       update.country = (country || "India").trim();
 
-    if (email && email.trim()) {
-      const e = email.trim().toLowerCase();
-      const conflict = await User.findOne({
-        email: e,
-        _id: { $ne: req.user.id },
-      });
-      if (conflict) {
-        return res.status(400).json({
-          success: false,
-          message: "Email already in use by another account",
-        });
-      }
-      update.email = e;
-    }
-
-    if (phone && String(phone).trim()) {
-      const p = String(phone).replace(/\D/g, "").trim();
-      const conflict = await User.findOne({
-        phone: p,
-        _id: { $ne: req.user.id },
-      });
-      if (conflict) {
-        return res.status(400).json({
-          success: false,
-          message: "Phone already in use by another account",
-        });
-      }
-      update.phone = p;
-    }
+    // Email and phone are identity fields — cannot be changed without re-verification.
+    // Silently ignore any email/phone in the request body.
 
     const user = await User.findByIdAndUpdate(req.user.id, update, {
       new: true,

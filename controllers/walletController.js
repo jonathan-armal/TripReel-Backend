@@ -200,7 +200,7 @@ exports.requestWithdrawal = async (req, res) => {
       .json({ success: false, message: "Insufficient wallet balance" });
   }
 
-  const referenceId = `wd_${operatorId}_${Date.now()}`;
+  const referenceId = `wd${Date.now().toString(36)}${String(operatorId).slice(-6)}`;
   const withdrawal = await Withdrawal.create({
     operatorId,
     amount,
@@ -298,6 +298,19 @@ exports.requestWithdrawal = async (req, res) => {
       "Withdrawal payout error:",
       err.rzpx ? JSON.stringify(err.rzpx) : err.message,
     );
+
+    // Self-heal: if the cached RazorpayX contact/fund account is invalid
+    // (e.g. keys/account changed), clear them so the next attempt recreates them.
+    if (
+      /fund_account|contact|does not exist|not found|invalid/i.test(friendly)
+    ) {
+      try {
+        operator.razorpayContactId = "";
+        operator.razorpayFundAccountId = "";
+        operator.razorpayFundFingerprint = "";
+        await operator.save();
+      } catch {}
+    }
 
     withdrawal.status = "FAILED";
     withdrawal.failureReason = err.message || "Payout failed";

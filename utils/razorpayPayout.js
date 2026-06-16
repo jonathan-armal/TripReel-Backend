@@ -15,11 +15,9 @@
 const RZPX_BASE = "https://api.razorpay.com/v1";
 
 function authHeader() {
-  // RazorpayX authenticates with the MAIN Razorpay account API keys.
-  // (The separate RAZORPAYX_KEY_* are NOT valid API credentials.)
-  // Only the account number below is RazorpayX-specific.
-  const id = process.env.RAZORPAY_KEY_ID;
-  const secret = process.env.RAZORPAY_KEY_SECRET;
+  // RazorpayX payouts authenticate with the dedicated RazorpayX API keys.
+  const id = process.env.RAZORPAYX_KEY_ID;
+  const secret = process.env.RAZORPAYX_KEY_SECRET;
   const token = Buffer.from(`${id}:${secret}`).toString("base64");
   return `Basic ${token}`;
 }
