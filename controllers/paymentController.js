@@ -85,6 +85,7 @@ exports.createOrder = async (req, res) => {
       amount: authoritativeAmount, // authoritative — client should charge this
       amountInPaise: order.amount,
       currency: order.currency,
+      keyId: process.env.RAZORPAY_KEY_ID, // app must use THIS key so it matches the order's account
     });
   } catch (err) {
     console.error("Razorpay create order error:", err);
@@ -124,6 +125,12 @@ exports.verifyPayment = async (req, res) => {
       .digest("hex");
 
     if (expectedSignature !== razorpay_signature) {
+      console.error("[verifyPayment] signature mismatch", {
+        razorpay_order_id,
+        razorpay_payment_id,
+        keyIdInUse: process.env.RAZORPAY_KEY_ID,
+        secretLoaded: !!process.env.RAZORPAY_KEY_SECRET,
+      });
       return res.status(400).json({
         success: false,
         message: "Payment verification failed — invalid signature",
