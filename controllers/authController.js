@@ -178,11 +178,14 @@ exports.signupSendOtp = async (req, res) => {
 
     // OTP delivery: In production, send via DLT SMS. In dev, logged to console.
     console.log(`[DEV] Signup OTP for ${phone}: ${code}`);
-    res.json({
+    const response = {
       success: true,
       message: "OTP sent successfully",
       expiresIn: OTP_TTL_MINUTES * 60,
-    });
+    };
+    // Only include OTP in response during testing (set OTP_DEV_MODE=true in .env)
+    if (process.env.OTP_DEV_MODE === "true") response.otp = code;
+    res.json(response);
   } catch (err) {
     // Handle duplicate key gracefully (rare race)
     if (err.code === 11000) {
@@ -331,11 +334,13 @@ exports.loginSendOtp = async (req, res) => {
 
     // OTP delivery: In production, send via DLT SMS. In dev, logged to console.
     console.log(`[DEV] Login OTP for ${phone}: ${code}`);
-    res.json({
+    const response = {
       success: true,
       message: "OTP sent successfully",
       expiresIn: OTP_TTL_MINUTES * 60,
-    });
+    };
+    if (process.env.OTP_DEV_MODE === "true") response.otp = code;
+    res.json(response);
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
