@@ -6,6 +6,8 @@ const itineraryDaySchema = new mongoose.Schema(
     title: { type: String, required: true },
     points: [{ type: String }],
     pickupPoint: { type: String, default: "" },
+    pickupLat: { type: Number, default: null },
+    pickupLng: { type: Number, default: null },
     isOutsideCity: { type: Boolean, default: false },
   },
   { _id: false },

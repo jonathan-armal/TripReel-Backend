@@ -63,6 +63,7 @@ async function runSnapjaDispatch() {
           "name phone email",
         );
         const addonDays = booking.addonDays || {};
+        const snapjaBookings = booking.snapjaBookings || {};
 
         for (const addonName of Object.keys(addonDays)) {
           const serviceType = addonName.toLowerCase().includes("photographer")
@@ -74,8 +75,9 @@ async function runSnapjaDispatch() {
             actualDate.setDate(actualDate.getDate() + dayIdx);
             const location =
               dayInfo?.pickupPoint || pkg?.location || pkg?.title || "India";
+            const key = `${addonName}_${dayIdx}`;
             try {
-              await fetch(SNAPJA_API, {
+              const snapjaRes = await fetch(SNAPJA_API, {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
@@ -97,7 +99,24 @@ async function runSnapjaDispatch() {
                   auto_confirm_payment: true,
                 }),
               });
+              const snapjaData = await snapjaRes.json().catch(() => ({}));
               results.callsMade++;
+
+              if (snapjaRes.ok && snapjaData.success) {
+                // Save Snapja booking reference per addon-day
+                snapjaBookings[key] = {
+                  bookingId: snapjaData.booking?.booking_id || "",
+                  snapjaId: snapjaData.booking?.id || "",
+                  otp: snapjaData.booking?.otp || "",
+                  otpExpiresAt: snapjaData.booking?.otp_expires_at || "",
+                  status: snapjaData.booking?.status || "confirmed",
+                  dispatchedAt: new Date().toISOString(),
+                };
+              } else {
+                results.errors.push(
+                  `Snapja ${booking.bookingId} day ${dayIdx + 1}: ${snapjaData?.message || snapjaRes.status}`,
+                );
+              }
             } catch (e) {
               results.errors.push(
                 `Snapja ${booking.bookingId} day ${dayIdx + 1}: ${e.message}`,
@@ -108,8 +127,27 @@ async function runSnapjaDispatch() {
 
         booking.addonDispatched = true;
         booking.addonDispatchedAt = new Date();
+        booking.snapjaBookings = snapjaBookings;
+        booking.markModified("snapjaBookings");
         await booking.save();
         results.dispatched++;
+
+        // Notify user with OTP for each dispatched addon-day
+        const { notifyUser } = require("./notificationController");
+        const otpLines = Object.entries(snapjaBookings)
+          .filter(([, v]) => v.otp)
+          .map(([k, v]) => {
+            const [name, dayIdx] = k.split("_");
+            return `${name} Day ${Number(dayIdx) + 1}: OTP ${v.otp} (Snapja ID: ${v.bookingId})`;
+          });
+        if (otpLines.length > 0) {
+          notifyUser(
+            booking.userId,
+            "Addon Confirmed 📸",
+            `Your addon service for ${booking.snapshot?.packageTitle || "trip"} is confirmed. Verify with OTP on the day:\n${otpLines.join("\n")}`,
+            { type: "general", bookingId: booking._id.toString() },
+          );
+        }
       } catch (e) {
         results.errors.push(`Dispatch ${booking.bookingId}: ${e.message}`);
       }
@@ -120,6 +158,101 @@ async function runSnapjaDispatch() {
   return results;
 }
 exports.runSnapjaDispatch = runSnapjaDispatch;
+
+/**
+ * Job: sync Snapja booking statuses (check if creator assigned, status changed)
+ * Runs periodically to update our records without waiting for user to open the screen.
+ */
+async function runSnapjaStatusSync() {
+  const results = { synced: 0, updated: 0, errors: [] };
+  try {
+    // Find dispatched bookings that have snapjaBookings data and trip hasn't ended
+    const bookings = await TripBooking.find({
+      addonDispatched: true,
+      snapjaBookings: { $ne: null, $ne: {} },
+      status: { $in: ["CONFIRMED", "COMPLETED"] },
+    }).populate("batchId", "endDate");
+
+    for (const booking of bookings) {
+      // Skip if trip already ended more than 3 days ago
+      const endDate = booking.batchId?.endDate;
+      if (
+        endDate &&
+        new Date(endDate) < new Date(Date.now() - 3 * 24 * 60 * 60 * 1000)
+      )
+        continue;
+
+      let updated = false;
+      const snapjaBookings = { ...booking.snapjaBookings };
+
+      for (const [key, snap] of Object.entries(snapjaBookings)) {
+        if (!snap.bookingId || snap.creatorName) continue; // already has creator — skip
+        try {
+          const snapRes = await fetch(`${SNAPJA_API}/${snap.bookingId}`, {
+            headers: { "X-API-Key": SNAPJA_API_KEY },
+          });
+          if (!snapRes.ok) continue;
+          const data = await snapRes.json();
+          const b = data.booking;
+          if (!b) continue;
+
+          if (b.status && b.status !== snap.status) {
+            snapjaBookings[key].status = b.status;
+            updated = true;
+          }
+          if (b.creator) {
+            snapjaBookings[key].creatorName =
+              b.creator.name || b.creator.display_name || "";
+            snapjaBookings[key].creatorPhoto =
+              b.creator.profile_image || b.creator.avatar || "";
+            snapjaBookings[key].creatorPhone = b.creator.phone || "";
+            updated = true;
+          }
+          if (b.otp && b.otp !== snap.otp) {
+            snapjaBookings[key].otp = b.otp;
+            if (b.otp_expires_at)
+              snapjaBookings[key].otpExpiresAt = b.otp_expires_at;
+            updated = true;
+          }
+          results.synced++;
+        } catch (e) {
+          results.errors.push(`${booking.bookingId} ${key}: ${e.message}`);
+        }
+      }
+
+      if (updated) {
+        booking.snapjaBookings = snapjaBookings;
+        booking.markModified("snapjaBookings");
+        await booking.save();
+        results.updated++;
+
+        // Notify user if creator was just assigned
+        const newCreators = Object.values(snapjaBookings).filter(
+          (s) =>
+            s.creatorName &&
+            !Object.values(booking.snapjaBookings || {}).find(
+              (o) => o.bookingId === s.bookingId && o.creatorName,
+            ),
+        );
+        if (newCreators.length > 0) {
+          const { notifyUser } = require("./notificationController");
+          const names = newCreators.map((c) => c.creatorName).join(", ");
+          notifyUser(
+            booking.userId,
+            "Photographer Assigned! 📷",
+            `${names} has been assigned for your addon service. Check booking details for their OTP.`,
+            { type: "general", bookingId: booking._id.toString() },
+          );
+        }
+      }
+      await delay(200); // avoid hammering Snapja
+    }
+  } catch (err) {
+    results.errors.push(`Snapja sync error: ${err.message}`);
+  }
+  return results;
+}
+exports.runSnapjaStatusSync = runSnapjaStatusSync;
 
 /**
  * Cron Job Logic

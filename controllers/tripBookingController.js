@@ -745,7 +745,8 @@ exports.adminGetAllBookings = async (req, res) => {
     if (packageId) query.packageId = packageId;
     if (operatorId) query.operatorId = operatorId;
     if (batchId) query.batchId = batchId;
-    if (search) query.bookingId = { $regex: escapeRegex(search), $options: "i" };
+    if (search)
+      query.bookingId = { $regex: escapeRegex(search), $options: "i" };
     if (fromDate || toDate) {
       query.createdAt = {};
       if (fromDate) query.createdAt.$gte = new Date(fromDate);
@@ -900,7 +901,8 @@ exports.operatorGetMyBookings = async (req, res) => {
     if (status && status !== "all") query.status = status;
     if (packageId) query.packageId = packageId;
     if (batchId) query.batchId = batchId;
-    if (search) query.bookingId = { $regex: escapeRegex(search), $options: "i" };
+    if (search)
+      query.bookingId = { $regex: escapeRegex(search), $options: "i" };
     if (fromDate || toDate) {
       query.createdAt = {};
       if (fromDate) query.createdAt.$gte = new Date(fromDate);
@@ -1247,7 +1249,8 @@ exports.adminGetRefunds = async (req, res) => {
     if (refundStatus && refundStatus !== "all")
       query.refundStatus = refundStatus;
     if (cancelledBy && cancelledBy !== "all") query.cancelledBy = cancelledBy;
-    if (search) query.bookingId = { $regex: escapeRegex(search), $options: "i" };
+    if (search)
+      query.bookingId = { $regex: escapeRegex(search), $options: "i" };
     if (fromDate || toDate) {
       query.cancelledAt = {};
       if (fromDate) query.cancelledAt.$gte = new Date(fromDate);
@@ -1354,6 +1357,77 @@ exports.adminMarkRefundDone = async (req, res) => {
       booking.cancelReason = `${booking.cancelReason} | ${req.body.note}`;
     await booking.save();
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── Sync Snapja addon status for a single booking ─────────────────────────────
+// GET /api/trip-bookings/:id/sync-snapja
+exports.syncSnapjaStatus = async (req, res) => {
+  try {
+    const booking = await TripBooking.findById(req.params.id);
+    if (!booking) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Booking not found" });
+    }
+    if (!booking.addonDispatched || !booking.snapjaBookings) {
+      return res.json({
+        success: true,
+        updated: false,
+        snapjaBookings: booking.snapjaBookings || {},
+      });
+    }
+
+    const SNAPJA_API = "https://api.snapja.com/api/tripreel/bookings";
+    const SNAPJA_API_KEY = process.env.SNAPJA_API_KEY || "tripreel_snapja_2025";
+
+    let updated = false;
+    const snapjaBookings = { ...booking.snapjaBookings };
+
+    for (const [key, snap] of Object.entries(snapjaBookings)) {
+      if (!snap.bookingId) continue;
+      try {
+        const snapRes = await fetch(`${SNAPJA_API}/${snap.bookingId}`, {
+          headers: { "X-API-Key": SNAPJA_API_KEY },
+        });
+        if (!snapRes.ok) continue;
+        const data = await snapRes.json();
+        const b = data.booking;
+        if (!b) continue;
+
+        // Update status
+        if (b.status && b.status !== snap.status) {
+          snapjaBookings[key].status = b.status;
+          updated = true;
+        }
+        // Update creator info if assigned
+        if (b.creator && !snap.creatorName) {
+          snapjaBookings[key].creatorName =
+            b.creator.name || b.creator.display_name || "";
+          snapjaBookings[key].creatorPhoto =
+            b.creator.profile_image || b.creator.avatar || "";
+          snapjaBookings[key].creatorPhone = b.creator.phone || "";
+          updated = true;
+        }
+        // Update OTP if refreshed
+        if (b.otp && b.otp !== snap.otp) {
+          snapjaBookings[key].otp = b.otp;
+          if (b.otp_expires_at)
+            snapjaBookings[key].otpExpiresAt = b.otp_expires_at;
+          updated = true;
+        }
+      } catch {}
+    }
+
+    if (updated) {
+      booking.snapjaBookings = snapjaBookings;
+      booking.markModified("snapjaBookings");
+      await booking.save();
+    }
+
+    res.json({ success: true, updated, snapjaBookings });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

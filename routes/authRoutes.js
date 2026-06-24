@@ -8,6 +8,7 @@ const {
   signupVerifyOtp,
   loginSendOtp,
   loginVerifyOtp,
+  googleLogin,
 } = require("../controllers/authController");
 const { protect } = require("../middleware/authMiddleware");
 
@@ -20,6 +21,9 @@ router.post("/signup/send-otp", signupSendOtp);
 router.post("/signup/verify-otp", signupVerifyOtp);
 router.post("/login/send-otp", loginSendOtp);
 router.post("/login/verify-otp", loginVerifyOtp);
+
+// Google Sign-In (mobile app)
+router.post("/google", googleLogin);
 
 // Session
 router.get("/me", protect, getMe);

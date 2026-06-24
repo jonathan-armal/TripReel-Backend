@@ -206,6 +206,12 @@ const tripBookingSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    // Snapja booking references — saved after dispatch so we can track/cancel each addon-day
+    // Structure: { "addonName_dayIdx": { bookingId, snapjaId, otp, status } }
+    snapjaBookings: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    },
   },
   { timestamps: true },
 );

@@ -103,6 +103,7 @@ mongoose
       runReviewReminders,
       runWishlistAlerts,
       runSnapjaDispatch,
+      runSnapjaStatusSync,
       runCronJobs,
     } = require("./controllers/cronController");
 
@@ -153,6 +154,24 @@ mongoose
           }
         } catch (err) {
           console.error("❌ Cron Snapja dispatch error:", err.message);
+        }
+      },
+      { timezone: "Asia/Kolkata" },
+    );
+
+    // Every 4 hours — sync Snapja booking statuses (check creator assignment)
+    cron.schedule(
+      "0 */4 * * *",
+      async () => {
+        try {
+          const result = await runSnapjaStatusSync();
+          if (result.updated) {
+            console.log(
+              `✅ Cron (Snapja sync): ${result.synced} checked, ${result.updated} updated`,
+            );
+          }
+        } catch (err) {
+          console.error("❌ Cron Snapja sync error:", err.message);
         }
       },
       { timezone: "Asia/Kolkata" },

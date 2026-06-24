@@ -59,6 +59,9 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    // Google Sign-In
+    googleId: { type: String, default: "", sparse: true },
+    profileImage: { type: String, default: "" },
   },
   { timestamps: true },
 );

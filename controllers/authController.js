@@ -433,7 +433,30 @@ exports.updateProfile = async (req, res) => {
       update.country = (country || "India").trim();
 
     // Email and phone are identity fields — cannot be changed without re-verification.
-    // Silently ignore any email/phone in the request body.
+    // Exception: Google users can SET phone once (it starts empty).
+    const { phone } = req.body;
+    if (phone && String(phone).trim()) {
+      const currentUser = await User.findById(req.user.id).select("phone");
+      if (!currentUser.phone) {
+        // First-time phone setup (Google user) — allow it
+        const p = String(phone).replace(/\D/g, "").trim();
+        if (p.length === 10) {
+          const conflict = await User.findOne({
+            phone: p,
+            _id: { $ne: req.user.id },
+          });
+          if (conflict) {
+            return res.status(400).json({
+              success: false,
+              message:
+                "This phone number is already linked to another account.",
+            });
+          }
+          update.phone = p;
+        }
+      }
+      // If phone already exists, silently ignore (locked)
+    }
 
     const user = await User.findByIdAndUpdate(req.user.id, update, {
       new: true,
@@ -478,5 +501,97 @@ exports.adminToggleUserSuspend = async (req, res) => {
     res.json({ success: true, message: `User ${user.status}`, user });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Google Sign-In (mobile app)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// POST /api/auth/google
+// Body: { idToken }
+// Verifies the Google ID token, creates/finds user, returns JWT
+exports.googleLogin = async (req, res) => {
+  try {
+    const { idToken } = req.body;
+    if (!idToken) {
+      return res
+        .status(400)
+        .json({ success: false, message: "idToken is required" });
+    }
+
+    // Verify the Google ID token using Google's tokeninfo endpoint
+    const googleRes = await fetch(
+      `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`,
+    );
+    const payload = await googleRes.json();
+
+    if (!googleRes.ok || !payload.email) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid Google token",
+      });
+    }
+
+    // Verify the token was issued for our app
+    const expectedAudience = process.env.GOOGLE_WEB_CLIENT_ID;
+    if (expectedAudience && payload.aud !== expectedAudience) {
+      return res.status(401).json({
+        success: false,
+        message: "Token not intended for this application",
+      });
+    }
+
+    const { email, name, picture, sub: googleId } = payload;
+
+    // Find existing user by email or googleId
+    let user = await User.findOne({
+      $or: [{ email: email.toLowerCase() }, { googleId }],
+    });
+
+    if (user) {
+      // Link Google account if not already linked
+      if (!user.googleId) {
+        user.googleId = googleId;
+        if (!user.profileImage && picture) user.profileImage = picture;
+        await user.save();
+      }
+
+      if (user.status === "Suspended") {
+        return res.status(403).json({
+          success: false,
+          message: "Your account has been suspended",
+        });
+      }
+    } else {
+      // Create new user from Google profile
+      user = await User.create({
+        name: name || "User",
+        email: email.toLowerCase(),
+        googleId,
+        profileImage: picture || "",
+        // phone left undefined — sparse unique index skips null/undefined
+        status: "Active",
+      });
+    }
+
+    const token = signToken(user._id);
+    res.json({
+      success: true,
+      token,
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        profileImage: user.profileImage,
+        state: user.state,
+        country: user.country,
+      },
+      isNewUser: !user.phone, // hint to app: show "add phone" prompt if no phone
+    });
+  } catch (err) {
+    console.error("Google login error:", err.message);
+    res.status(500).json({ success: false, message: "Google sign-in failed" });
   }
 };

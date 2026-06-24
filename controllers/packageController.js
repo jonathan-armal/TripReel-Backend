@@ -66,27 +66,46 @@ exports.getAllPackages = async (req, res) => {
       userCountry,
       userState,
       date,
+      dateFrom,
+      dateTo,
       guests,
       page = 1,
       limit = 20,
     } = req.query;
     const query = { isActive: true, status: { $in: ["APPROVED"] } };
 
-    // If date filter provided, find batches on that date first
-    if (date) {
+    // Date range filter: dateFrom/dateTo or single date
+    const hasRange = dateFrom || dateTo;
+    if (date || hasRange) {
       const Batch = require("../models/Batch");
-      const searchDate = new Date(date);
-      searchDate.setHours(0, 0, 0, 0);
-      const nextDay = new Date(searchDate);
-      nextDay.setDate(nextDay.getDate() + 1);
 
-      const batchQuery = {
-        isActive: true,
-        startDate: { $lte: nextDay },
-        endDate: { $gte: searchDate },
+      const istOffset = 5.5 * 60 * 60 * 1000;
+      const toISTDayStart = (str) => {
+        const [y, m, d] = str.split("-").map(Number);
+        return new Date(Date.UTC(y, m - 1, d) - istOffset);
+      };
+      const toISTDayEnd = (str) => {
+        const [y, m, d] = str.split("-").map(Number);
+        return new Date(
+          Date.UTC(y, m - 1, d) - istOffset + 24 * 60 * 60 * 1000,
+        );
       };
 
-      // If guests specified, only batches with enough seats
+      let startFilter;
+      if (hasRange) {
+        // Range: batches that START anywhere in [dateFrom, dateTo]
+        startFilter = {};
+        if (dateFrom) startFilter.$gte = toISTDayStart(dateFrom);
+        if (dateTo) startFilter.$lt = toISTDayEnd(dateTo);
+      } else {
+        // Single day: batches that START on exactly that day
+        startFilter = {
+          $gte: toISTDayStart(date),
+          $lt: toISTDayEnd(date),
+        };
+      }
+
+      const batchQuery = { isActive: true, startDate: startFilter };
       if (guests && Number(guests) > 0) {
         batchQuery.$expr = {
           $gte: [
@@ -100,11 +119,9 @@ exports.getAllPackages = async (req, res) => {
       const packageIds = [
         ...new Set(matchingBatches.map((b) => b.packageId.toString())),
       ];
-
       if (packageIds.length === 0) {
         return res.json({ success: true, total: 0, page: 1, packages: [] });
       }
-
       query._id = { $in: packageIds };
     }
 

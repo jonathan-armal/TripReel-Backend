@@ -12,6 +12,7 @@ const {
   adminGetRefunds,
   adminRetryRefund,
   adminMarkRefundDone,
+  syncSnapjaStatus,
 } = require("../controllers/tripBookingController");
 const { protect, restrictTo } = require("../middleware/authMiddleware");
 const { operatorProtect } = require("../middleware/operatorAuthMiddleware");
@@ -33,6 +34,7 @@ router.post(
 
 router.get("/:id", getBookingById);
 router.get("/:id/refund-preview", getRefundPreview);
+router.get("/:id/sync-snapja", syncSnapjaStatus);
 router.post("/:id/cancel", cancelBooking);
 
 // ── Admin ─────────────────────────────────────────────────────────────────────
