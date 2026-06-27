@@ -14,6 +14,7 @@
  */
 
 require("dotenv").config();
+process.env.TZ = process.env.TZ || "Asia/Kolkata"; // IST for all date math
 const mongoose = require("mongoose");
 
 const TripBooking = require("../models/TripBooking");

@@ -23,7 +23,15 @@ function getRazorpay() {
  */
 exports.createOrder = async (req, res) => {
   try {
-    const { packageId, batchId, seats, couponCode, addonDays } = req.body;
+    const {
+      packageId,
+      batchId,
+      seats,
+      adults,
+      children,
+      couponCode,
+      addonDays,
+    } = req.body;
 
     if (!packageId || !batchId) {
       return res.status(400).json({
@@ -41,6 +49,8 @@ exports.createOrder = async (req, res) => {
           packageId,
           batchId,
           seats,
+          adults,
+          children,
           couponCode,
           addonDays,
         });
@@ -70,6 +80,8 @@ exports.createOrder = async (req, res) => {
         packageId: String(packageId),
         batchId: String(batchId),
         seats: String(seats || 1),
+        adults: adults != null ? String(adults) : "",
+        children: children != null ? String(children) : "0",
         userId: req.user._id.toString(),
         couponCode: couponCode || "",
         addonDays: addonDaysStr.slice(0, 480), // notes value cap
@@ -199,11 +211,16 @@ exports.verifyPayment = async (req, res) => {
         packageId,
         batchId,
         seats: Number(seats) || 1,
+        adults: notes.adults ? Number(notes.adults) : undefined,
+        children: notes.children ? Number(notes.children) : 0,
         couponCode: couponCode || "",
         travelers: req.body.travelers || [],
         paymentId: razorpay_payment_id,
         razorpayOrderId: razorpay_order_id,
         addonDays,
+        // Meeting time/place chosen by the user — metadata only (not priced),
+        // safe to take from the client request body.
+        addonSchedule: req.body.addonSchedule || null,
       },
     };
 

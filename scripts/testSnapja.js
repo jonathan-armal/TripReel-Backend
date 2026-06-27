@@ -3,6 +3,7 @@
  *   node scripts/testSnapja.js
  */
 require("dotenv").config();
+process.env.TZ = process.env.TZ || "Asia/Kolkata"; // IST for all date math
 
 const SNAPJA_API = "https://api.snapja.com/api/tripreel/bookings";
 const SNAPJA_API_KEY = process.env.SNAPJA_API_KEY || "tripreel_snapja_2025";

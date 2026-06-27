@@ -4,7 +4,10 @@ const mongoose = require("mongoose");
 const pricingSchema = new mongoose.Schema(
   {
     adultPrice: { type: Number, default: 0 },
+    childPrice: { type: Number, default: 0 },
     seats: { type: Number, default: 1 },
+    adults: { type: Number, default: 0 },
+    children: { type: Number, default: 0 },
     subtotal: { type: Number, default: 0 },
     // Explicit breakdown for accurate refund math
     fareSubtotal: { type: Number, default: 0 }, // package fare only (adult+child), pre-addon, pre-gst
@@ -168,6 +171,13 @@ const tripBookingSchema = new mongoose.Schema(
 
     // Addon day selections — { addonName: [dayIndex, ...] }
     addonDays: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    // Per addon-day meeting schedule chosen by the user:
+    // { addonName: { dayIndex: { time, placeName, lat, lng } } }
+    // Used to dispatch Snapja with the exact location + time the user wants.
+    addonSchedule: {
       type: mongoose.Schema.Types.Mixed,
       default: null,
     },

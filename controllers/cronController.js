@@ -22,8 +22,19 @@ async function refundPercentForDate(startDate) {
     if (Array.isArray(s) && s.length > 0) slabs = s;
   } catch {}
   slabs.sort((a, b) => b.daysBeforeTrip - a.daysBeforeTrip);
-  const days = Math.ceil(
-    (new Date(startDate) - new Date()) / (1000 * 60 * 60 * 24),
+  // Normalize both dates to IST midnight (TZ pinned to Asia/Kolkata) so the
+  // "days before trip" is an exact whole-day count, free of the UTC-midnight
+  // skew that date-only picker values carry.
+  const s2 = new Date(startDate);
+  const startMid = new Date(s2.getFullYear(), s2.getMonth(), s2.getDate());
+  const now2 = new Date();
+  const todayMid = new Date(
+    now2.getFullYear(),
+    now2.getMonth(),
+    now2.getDate(),
+  );
+  const days = Math.round(
+    (startMid.getTime() - todayMid.getTime()) / (1000 * 60 * 60 * 24),
   );
   for (const slab of slabs) {
     if (days >= slab.daysBeforeTrip) return slab.refundPercent;
@@ -73,8 +84,20 @@ async function runSnapjaDispatch() {
             const dayInfo = pkg?.itinerary?.[dayIdx];
             const actualDate = new Date(startDate);
             actualDate.setDate(actualDate.getDate() + dayIdx);
+
+            // User-chosen schedule for this addon-day (preferred), else operator defaults
+            const sched =
+              (booking.addonSchedule &&
+                booking.addonSchedule[addonName] &&
+                booking.addonSchedule[addonName][dayIdx]) ||
+              {};
             const location =
-              dayInfo?.pickupPoint || pkg?.location || pkg?.title || "India";
+              sched.placeName ||
+              dayInfo?.pickupPoint ||
+              pkg?.location ||
+              pkg?.title ||
+              "India";
+            const time = sched.time || dayInfo?.pickupTime || "10:00";
             const key = `${addonName}_${dayIdx}`;
             try {
               const snapjaRes = await fetch(SNAPJA_API, {
@@ -85,11 +108,17 @@ async function runSnapjaDispatch() {
                 },
                 body: JSON.stringify({
                   service_type: serviceType,
-                  location,
+                  // Send location as an object so lat/lng survive — Snapja only
+                  // reads location.lat/lng and ignores top-level latitude/longitude.
+                  location: {
+                    address: location,
+                    lat: sched.lat || dayInfo?.pickupLat || 0,
+                    lng: sched.lng || dayInfo?.pickupLng || 0,
+                  },
                   price: ADDON_BASE_PRICE,
                   duration: 1,
                   date: actualDate.toISOString().split("T")[0],
-                  time: "10:00",
+                  time,
                   booking_type: "scheduled",
                   customer_name: user?.name || "TripReel User",
                   customer_phone: user?.phone || "",
@@ -186,7 +215,9 @@ async function runSnapjaStatusSync() {
       const snapjaBookings = { ...booking.snapjaBookings };
 
       for (const [key, snap] of Object.entries(snapjaBookings)) {
-        if (!snap.bookingId || snap.creatorName) continue; // already has creator — skip
+        if (!snap.bookingId) continue;
+        // Once a creator is assigned we keep polling only to track live status
+        // (on_the_way → in_progress → completed) until the trip ends.
         try {
           const snapRes = await fetch(`${SNAPJA_API}/${snap.bookingId}`, {
             headers: { "X-API-Key": SNAPJA_API_KEY },
@@ -199,12 +230,43 @@ async function runSnapjaStatusSync() {
           if (b.status && b.status !== snap.status) {
             snapjaBookings[key].status = b.status;
             updated = true;
+
+            // No creator could be found / booking cancelled on Snapja side →
+            // flag for refund so the held addon money is released to the user.
+            const failStatuses = [
+              "no_creator_available",
+              "cancelled",
+              "expired",
+            ];
+            if (
+              failStatuses.includes(String(b.status).toLowerCase()) &&
+              !snapjaBookings[key].refundFlagged
+            ) {
+              snapjaBookings[key].refundFlagged = true;
+              snapjaBookings[key].refundReason = b.status;
+              results.errors.push(
+                `Snapja no-creator/cancel for ${booking.bookingId} ${key}: ${b.status} — flagged for refund`,
+              );
+              try {
+                const { notifyUser } = require("./notificationController");
+                notifyUser(
+                  booking.userId,
+                  "Add-on Could Not Be Assigned",
+                  `We couldn't assign a creator for one of your add-on days. A refund for that add-on will be processed.`,
+                  { type: "general", bookingId: booking._id.toString() },
+                );
+              } catch {}
+            }
           }
-          if (b.creator) {
+          if (b.creator && !snapjaBookings[key].creatorName) {
             snapjaBookings[key].creatorName =
               b.creator.name || b.creator.display_name || "";
+            // Snapja's GET /tripreel/bookings/:id returns the photo as `picture`.
             snapjaBookings[key].creatorPhoto =
-              b.creator.profile_image || b.creator.avatar || "";
+              b.creator.picture ||
+              b.creator.profile_image ||
+              b.creator.avatar ||
+              "";
             snapjaBookings[key].creatorPhone = b.creator.phone || "";
             updated = true;
           }

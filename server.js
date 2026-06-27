@@ -7,6 +7,14 @@ const http = require("http");
 
 dotenv.config();
 
+// ── Force Indian Standard Time for ALL server-side date math ────────────────
+// TripReel operates only in India. Pinning the process timezone makes every
+// `new Date()`, `.getDate()`, `.getHours()`, and server-side toLocaleString
+// resolve in IST regardless of where the server is hosted (cloud hosts default
+// to UTC). This prevents off-by-one-day errors in refund slabs, auto-complete,
+// trip countdowns, and Snapja dispatch dates. Must run before any Date usage.
+process.env.TZ = process.env.TZ || "Asia/Kolkata";
+
 const app = express();
 const server = http.createServer(app);
 
@@ -159,9 +167,11 @@ mongoose
       { timezone: "Asia/Kolkata" },
     );
 
-    // Every 4 hours — sync Snapja booking statuses (check creator assignment)
+    // Every hour — sync Snapja booking statuses (check creator assignment).
+    // The app also syncs on-demand when the user opens booking details, so this
+    // is a background safety net to push notifications even when they're away.
     cron.schedule(
-      "0 */4 * * *",
+      "0 * * * *",
       async () => {
         try {
           const result = await runSnapjaStatusSync();

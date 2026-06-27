@@ -11,14 +11,25 @@ const escapeRegex = require("../utils/escapeRegex");
 
 function calcPricing({
   adultPrice,
+  childPrice = 0,
   seats,
+  adults,
+  children = 0,
   platformFeePercent,
   gstPercent,
   addonAmount = 0,
   addonSurcharge = 0,
   discountAmount = 0,
 }) {
-  const fareSubtotal = Math.round(adultPrice * seats);
+  // Backward compatible: if an explicit adults count isn't given, treat every
+  // seat as an adult (legacy behaviour). Otherwise price adults + children.
+  const numAdults = adults != null ? Number(adults) : Number(seats) || 0;
+  const numChildren = adults != null ? Number(children) || 0 : 0;
+  const totalSeats = numAdults + numChildren;
+
+  const fareSubtotal = Math.round(
+    adultPrice * numAdults + (childPrice || 0) * numChildren,
+  );
   const netFare = Math.max(0, fareSubtotal - discountAmount); // discount applies to fare only
   const subtotal = fareSubtotal + addonAmount;
   // GST charged on (discounted fare + addon)
@@ -31,7 +42,10 @@ function calcPricing({
   const operatorAmount = netFare - platformFeeAmount + addonSurcharge;
   return {
     adultPrice,
-    seats,
+    childPrice: childPrice || 0,
+    seats: totalSeats,
+    adults: numAdults,
+    children: numChildren,
     fareSubtotal,
     addonAmount,
     subtotal,
@@ -51,6 +65,8 @@ async function computeAuthoritativePricing({
   packageId,
   batchId,
   seats,
+  adults,
+  children,
   couponCode,
   addonDays,
 }) {
@@ -61,6 +77,10 @@ async function computeAuthoritativePricing({
   if (!pkg) throw new Error("Package not found");
   if (String(batch.packageId) !== String(packageId))
     throw new Error("Batch does not belong to this package");
+
+  // Resolve adult / child split (backward compatible — default all to adults)
+  const numAdults = adults != null ? Math.max(0, Number(adults)) : numSeats;
+  const numChildren = adults != null ? Math.max(0, Number(children) || 0) : 0;
 
   const platformFeePercent = (await getSetting("platform_fee_percent")) ?? 10;
   const gstPercent = (await getSetting("gst_percent")) ?? 5;
@@ -83,7 +103,9 @@ async function computeAuthoritativePricing({
   // Coupon (read-only — no usage increment here)
   const code = (couponCode || "").trim().toUpperCase();
   let discountAmount = 0;
-  const fareSubtotalRaw = Math.round(batch.adultPrice * numSeats);
+  const fareSubtotalRaw = Math.round(
+    batch.adultPrice * numAdults + (batch.childPrice || 0) * numChildren,
+  );
   if (code) {
     const Coupon = require("../models/Coupon");
     const now = new Date();
@@ -115,6 +137,9 @@ async function computeAuthoritativePricing({
 
   const pricing = calcPricing({
     adultPrice: batch.adultPrice,
+    childPrice: batch.childPrice || 0,
+    adults: numAdults,
+    children: numChildren,
     seats: numSeats,
     platformFeePercent,
     gstPercent,
@@ -176,9 +201,15 @@ async function debitOperatorWallet(operatorId, amount, bookingId, description) {
 async function resolveRefundPercent(startDate) {
   let refundPercent = 0;
   if (!startDate) return 0;
+  // Compare at IST date-level (midnight-to-midnight) so date-only picker values
+  // don't drift across timezones. Server TZ is pinned to Asia/Kolkata in server.js.
+  const s = new Date(startDate);
+  const startMid = new Date(s.getFullYear(), s.getMonth(), s.getDate());
   const now = new Date();
-  const tripStart = new Date(startDate);
-  const daysBeforeTrip = Math.ceil((tripStart - now) / (1000 * 60 * 60 * 24));
+  const todayMid = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const daysBeforeTrip = Math.round(
+    (startMid.getTime() - todayMid.getTime()) / (1000 * 60 * 60 * 24),
+  );
 
   let slabs = [
     { daysBeforeTrip: 7, refundPercent: 90 },
@@ -366,8 +397,14 @@ exports.createBooking = async (req, res) => {
     }
 
     const numSeats = Math.max(1, Number(seats) || 1);
-
-    // ── Fetch and validate batch ───────────────────────────────────────────
+    // Adult / child split for pricing (backward compatible — defaults to all adults)
+    const hasSplit = req.body.adults != null;
+    const numAdults = hasSplit
+      ? Math.max(0, Number(req.body.adults) || 0)
+      : numSeats;
+    const numChildren = hasSplit
+      ? Math.max(0, Number(req.body.children) || 0)
+      : 0;
     const batch = await Batch.findById(batchId);
     if (!batch || !batch.isActive) {
       return res
@@ -460,7 +497,9 @@ exports.createBooking = async (req, res) => {
     const couponCode = (req.body.couponCode || "").trim().toUpperCase();
     let discountAmount = 0;
     let appliedCouponId = null;
-    const fareSubtotalRaw = Math.round(batch.adultPrice * numSeats);
+    const fareSubtotalRaw = Math.round(
+      batch.adultPrice * numAdults + (batch.childPrice || 0) * numChildren,
+    );
 
     if (couponCode) {
       const Coupon = require("../models/Coupon");
@@ -513,6 +552,9 @@ exports.createBooking = async (req, res) => {
     // ── Calculate pricing (snapshotted forever) ────────────────────────────
     const pricing = calcPricing({
       adultPrice: batch.adultPrice,
+      childPrice: batch.childPrice || 0,
+      adults: numAdults,
+      children: numChildren,
       seats: numSeats,
       platformFeePercent,
       gstPercent,
@@ -551,6 +593,7 @@ exports.createBooking = async (req, res) => {
       pricing,
       snapshot,
       addonDays: addonDaysData,
+      addonSchedule: req.body.addonSchedule || null,
       addonSurcharge,
       addonNames,
       addonTotalPrice,
@@ -1063,9 +1106,18 @@ exports.getRefundPreview = async (req, res) => {
     const startDate = booking.snapshot?.startDate;
     let daysBeforeTrip = 0;
     if (startDate) {
+      // IST date-level comparison (midnight-to-midnight) to avoid TZ drift.
+      const s = new Date(startDate);
+      const startMid = new Date(s.getFullYear(), s.getMonth(), s.getDate());
       const now = new Date();
-      const tripStart = new Date(startDate);
-      daysBeforeTrip = Math.ceil((tripStart - now) / (1000 * 60 * 60 * 24));
+      const todayMid = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+      );
+      daysBeforeTrip = Math.round(
+        (startMid.getTime() - todayMid.getTime()) / (1000 * 60 * 60 * 24),
+      );
     }
     const refundPercent = await resolveRefundPercent(startDate);
 
@@ -1401,13 +1453,36 @@ exports.syncSnapjaStatus = async (req, res) => {
         if (b.status && b.status !== snap.status) {
           snapjaBookings[key].status = b.status;
           updated = true;
+
+          // No creator / cancelled / expired on Snapja side → flag for refund.
+          const failStatuses = ["no_creator_available", "cancelled", "expired"];
+          if (
+            failStatuses.includes(String(b.status).toLowerCase()) &&
+            !snapjaBookings[key].refundFlagged
+          ) {
+            snapjaBookings[key].refundFlagged = true;
+            snapjaBookings[key].refundReason = b.status;
+            try {
+              const { notifyUser } = require("./notificationController");
+              notifyUser(
+                booking.userId,
+                "Add-on Could Not Be Assigned",
+                `We couldn't assign a creator for one of your add-on days. A refund for that add-on will be processed.`,
+                { type: "general", bookingId: booking._id.toString() },
+              );
+            } catch {}
+          }
         }
         // Update creator info if assigned
         if (b.creator && !snap.creatorName) {
           snapjaBookings[key].creatorName =
             b.creator.name || b.creator.display_name || "";
+          // Snapja GET returns the photo as `picture`.
           snapjaBookings[key].creatorPhoto =
-            b.creator.profile_image || b.creator.avatar || "";
+            b.creator.picture ||
+            b.creator.profile_image ||
+            b.creator.avatar ||
+            "";
           snapjaBookings[key].creatorPhone = b.creator.phone || "";
           updated = true;
         }
