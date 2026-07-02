@@ -4,10 +4,21 @@ const fs = require("fs");
 
 // Operator uploads go into /uploads/operators/
 const uploadDir = path.join(__dirname, "../uploads/operators");
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+try {
+  if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+} catch (e) {
+  console.error("⚠️ Could not create operator upload dir:", e.message);
+}
 
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
+  destination: (req, file, cb) => {
+    // Ensure dir exists at request time too (handles ephemeral filesystems)
+    try {
+      if (!fs.existsSync(uploadDir))
+        fs.mkdirSync(uploadDir, { recursive: true });
+    } catch {}
+    cb(null, uploadDir);
+  },
   filename: (req, file, cb) => {
     const suffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
     cb(null, suffix + path.extname(file.originalname));

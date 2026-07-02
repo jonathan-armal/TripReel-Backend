@@ -84,6 +84,23 @@ app.get("/", (req, res) => {
 
 // ── Global error handler ──────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
+  // Ensure CORS headers are present even on error responses (multer errors,
+  // timeouts, etc. can bypass the cors() middleware response headers).
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+  );
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+
+  // Multer-specific errors (file too large, wrong type, etc.)
+  const multer = require("multer");
+  if (err instanceof multer.MulterError) {
+    let msg = err.message;
+    if (err.code === "LIMIT_FILE_SIZE") msg = "File too large (max 5 MB).";
+    return res.status(400).json({ success: false, message: msg });
+  }
+
   console.error(err.stack);
   res.status(err.status || 500).json({
     success: false,

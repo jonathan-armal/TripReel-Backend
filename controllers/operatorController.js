@@ -397,7 +397,7 @@ exports.submitOnboarding = async (req, res) => {
     if (req.files) {
       if (req.files["governmentId"]?.[0]) {
         operator.governmentId =
-          "/uploads/" + req.files["governmentId"][0].filename;
+          "/uploads/operators/" + req.files["governmentId"][0].filename;
         if (!operator.documentStatus) operator.documentStatus = {};
         operator.documentStatus.governmentId = {
           status: "PENDING",
@@ -407,7 +407,7 @@ exports.submitOnboarding = async (req, res) => {
       }
       if (req.files["selfieVerification"]?.[0]) {
         operator.selfieVerification =
-          "/uploads/" + req.files["selfieVerification"][0].filename;
+          "/uploads/operators/" + req.files["selfieVerification"][0].filename;
         if (!operator.documentStatus) operator.documentStatus = {};
         operator.documentStatus.selfieVerification = {
           status: "PENDING",
@@ -417,7 +417,7 @@ exports.submitOnboarding = async (req, res) => {
       }
       if (req.files["tradeLicense"]?.[0]) {
         operator.tradeLicensePath =
-          "/uploads/" + req.files["tradeLicense"][0].filename;
+          "/uploads/operators/" + req.files["tradeLicense"][0].filename;
         if (!operator.documentStatus) operator.documentStatus = {};
         operator.documentStatus.tradeLicense = {
           status: "PENDING",
@@ -426,7 +426,8 @@ exports.submitOnboarding = async (req, res) => {
         };
       }
       if (req.files["panCard"]?.[0]) {
-        operator.panCardPath = "/uploads/" + req.files["panCard"][0].filename;
+        operator.panCardPath =
+          "/uploads/operators/" + req.files["panCard"][0].filename;
         if (!operator.documentStatus) operator.documentStatus = {};
         operator.documentStatus.panCard = {
           status: "PENDING",
@@ -508,7 +509,7 @@ exports.reuploadDocument = async (req, res) => {
       tradeLicense: "tradeLicensePath",
       panCard: "panCardPath",
     };
-    operator[fieldMap[key]] = "/uploads/" + req.file.filename;
+    operator[fieldMap[key]] = "/uploads/operators/" + req.file.filename;
     operator.documentStatus[key] = {
       status: "PENDING",
       remark: "",
